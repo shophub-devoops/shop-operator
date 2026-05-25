@@ -35,6 +35,8 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	cnpgv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
+
 	appsv1 "github.com/shophub-devoops/shop-operator/api/apps/v1"
 	notifyv1 "github.com/shophub-devoops/shop-operator/api/notify/v1"
 	paymentsv1 "github.com/shophub-devoops/shop-operator/api/payments/v1"
@@ -55,6 +57,9 @@ func init() {
 	utilruntime.Must(appsv1.AddToScheme(scheme))
 	utilruntime.Must(notifyv1.AddToScheme(scheme))
 	utilruntime.Must(paymentsv1.AddToScheme(scheme))
+
+	// External types we manage child resources of.
+	utilruntime.Must(cnpgv1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
