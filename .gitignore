@@ -20,6 +20,9 @@ profile.cov
 # Dependency directories (remove the comment below to include it)
 # vendor/
 
+# Kubebuilder local build tools (controller-gen, kustomize, envtest) — fetched by `make`
+bin/
+
 # Go workspace file
 go.work
 go.work.sum
