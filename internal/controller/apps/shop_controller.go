@@ -18,18 +18,23 @@ package apps
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"time"
 
 	cnpgv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
+	mongodbv1 "github.com/mongodb/mongodb-kubernetes-operator/api/v1"
 	k8sappsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -49,6 +54,14 @@ const (
 	containerHTTPPort   = 80
 	serviceHTTPPort     = 8080
 	databaseStorageSize = "1Gi"
+	mongoDBVersion      = "6.0.5"
+	mongoPasswordBytes  = 16
+	// mongoDBDatabaseSA is the ServiceAccount name the MongoDB community operator
+	// expects on every Pod it spawns for a MongoDBCommunity CR. The operator's Helm
+	// chart only creates this SA in its own install namespace, so we must materialize
+	// it (plus its Role + RoleBinding) in every tenant namespace where we want
+	// MongoDBCommunity to actually schedule Pods.
+	mongoDBDatabaseSA = "mongodb-database"
 )
 
 // +kubebuilder:rbac:groups=apps.shophub.local,resources=shops,verbs=get;list;watch;create;update;patch;delete
@@ -57,6 +70,9 @@ const (
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services;secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=clusters,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=mongodbcommunity.mongodb.com,resources=mongodbcommunity,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch;delete
 
 func (r *ShopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	res, err := r.reconcile(ctx, req)
@@ -103,18 +119,27 @@ func (r *ShopReconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	return ctrl.Result{}, nil
 }
 
-// ensureDatabase creates a CNPG Cluster if absent and waits for the
-// auto-generated app Secret. Returns the Secret name once present, "" if
-// still waiting (caller should requeue), or an error for hard failures.
+// ensureDatabase dispatches to the postgres or mongodb branch based on Shop.Spec.Database.
+// Returns the Secret name holding connection details once present, "" if still
+// waiting (caller should requeue), or an error for hard failures.
 //
-// Note: spec is set only at creation time. CNPG owns the Cluster lifecycle
+// Spec is set only at creation time. The database operator owns the lifecycle
 // after that — we don't fight it with updates. Shop spec changes that affect
 // the database (e.g., switching DB kind) are handled by deletion + recreate.
 func (r *ShopReconciler) ensureDatabase(ctx context.Context, shop *appsv1.Shop) (string, error) {
-	if shop.Spec.Database != appsv1.DatabasePostgres {
-		return "", fmt.Errorf("database kind %q not implemented yet (postgres only for now)", shop.Spec.Database)
+	switch shop.Spec.Database {
+	case appsv1.DatabasePostgres:
+		return r.ensurePostgresDatabase(ctx, shop)
+	case appsv1.DatabaseMongoDB:
+		return r.ensureMongoDBDatabase(ctx, shop)
+	default:
+		return "", fmt.Errorf("unsupported database kind: %q", shop.Spec.Database)
 	}
+}
 
+// ensurePostgresDatabase creates a CNPG Cluster (if absent) and waits for the
+// auto-generated <shop-name>-app Secret that CNPG publishes after bootstrap.
+func (r *ShopReconciler) ensurePostgresDatabase(ctx context.Context, shop *appsv1.Shop) (string, error) {
 	cluster := &cnpgv1.Cluster{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      shop.Name,
@@ -149,6 +174,179 @@ func (r *ShopReconciler) ensureDatabase(ctx context.Context, shop *appsv1.Shop) 
 		return "", err
 	}
 	return secretName, nil
+}
+
+// ensureMongoDBDatabase creates a MongoDBCommunity CR with a generated user
+// password Secret, then waits for the operator-published connection-string
+// Secret. We pin the connection-string Secret name to <shop-name>-app so the
+// downstream ensureDeployment uses the same envFrom regardless of DB kind.
+func (r *ShopReconciler) ensureMongoDBDatabase(ctx context.Context, shop *appsv1.Shop) (string, error) {
+	if err := r.ensureMongoDBRBAC(ctx, shop); err != nil {
+		return "", fmt.Errorf("ensure mongodb-database RBAC: %w", err)
+	}
+
+	pwSecretName := shop.Name + "-mongo-pw"
+	if err := r.ensureMongoPasswordSecret(ctx, shop, pwSecretName); err != nil {
+		return "", fmt.Errorf("ensure mongo password secret: %w", err)
+	}
+
+	connSecretName := shop.Name + "-app"
+	mdb := &mongodbv1.MongoDBCommunity{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      shop.Name,
+			Namespace: shop.Namespace,
+		},
+		Spec: mongodbv1.MongoDBCommunitySpec{
+			Members: 1,
+			Type:    mongodbv1.ReplicaSet,
+			Version: mongoDBVersion,
+			Security: mongodbv1.Security{
+				Authentication: mongodbv1.Authentication{
+					Modes: []mongodbv1.AuthMode{"SCRAM"},
+				},
+			},
+			Users: []mongodbv1.MongoDBUser{{
+				Name: shop.Name,
+				DB:   "admin",
+				PasswordSecretRef: mongodbv1.SecretKeyReference{
+					Name: pwSecretName,
+					Key:  "password",
+				},
+				Roles: []mongodbv1.Role{
+					{Name: "dbOwner", DB: shop.Name},
+				},
+				ScramCredentialsSecretName: shop.Name + "-scram",
+				ConnectionStringSecretName: connSecretName,
+			}},
+		},
+	}
+	// mongodbv1.MongoDBCommunity GetOwnerReferences returns a synthesized self-ref
+	// that confuses controllerutil.SetControllerReference. Build the Shop owner ref
+	// manually and assign via the embedded ObjectMeta field directly (promotion
+	// bypasses the method override).
+	shopGVK, err := apiutil.GVKForObject(shop, r.Scheme)
+	if err != nil {
+		return "", fmt.Errorf("gvk for shop: %w", err)
+	}
+	yes := true
+	mdb.OwnerReferences = []metav1.OwnerReference{{
+		APIVersion:         shopGVK.GroupVersion().String(),
+		Kind:               shopGVK.Kind,
+		Name:               shop.GetName(),
+		UID:                shop.GetUID(),
+		BlockOwnerDeletion: &yes,
+		Controller:         &yes,
+	}}
+	if err := r.Create(ctx, mdb); err != nil && !apierrors.IsAlreadyExists(err) {
+		return "", fmt.Errorf("create MongoDBCommunity: %w", err)
+	}
+
+	sec := &corev1.Secret{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: shop.Namespace, Name: connSecretName}, sec); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	return connSecretName, nil
+}
+
+// ensureMongoPasswordSecret creates a Secret with a random password if absent.
+// The Shop owns this Secret so it's garbage-collected when the Shop is deleted.
+func (r *ShopReconciler) ensureMongoPasswordSecret(ctx context.Context, shop *appsv1.Shop, name string) error {
+	existing := &corev1.Secret{}
+	err := r.Get(ctx, client.ObjectKey{Namespace: shop.Namespace, Name: name}, existing)
+	if err == nil {
+		return nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	pw, err := generatePassword()
+	if err != nil {
+		return fmt.Errorf("generate password: %w", err)
+	}
+
+	sec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: shop.Namespace,
+		},
+		StringData: map[string]string{"password": pw},
+	}
+	if err := controllerutil.SetControllerReference(shop, sec, r.Scheme); err != nil {
+		return err
+	}
+	return r.Create(ctx, sec)
+}
+
+func generatePassword() (string, error) {
+	buf := make([]byte, mongoPasswordBytes)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+// ensureMongoDBRBAC materializes the ServiceAccount + Role + RoleBinding that
+// the MongoDB community operator's spawned Pods require, in the Shop's
+// namespace. All three are owned by the Shop CR so they're garbage-collected
+// on Shop deletion.
+//
+// The operator's Helm chart only installs these in its own namespace, so
+// without this step MongoDBCommunity CRs in other namespaces stall with
+// "serviceaccount mongodb-database not found".
+func (r *ShopReconciler) ensureMongoDBRBAC(ctx context.Context, shop *appsv1.Shop) error {
+	sa := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      mongoDBDatabaseSA,
+			Namespace: shop.Namespace,
+		},
+	}
+	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, sa, func() error {
+		return controllerutil.SetControllerReference(shop, sa, r.Scheme)
+	}); err != nil {
+		return fmt.Errorf("upsert ServiceAccount: %w", err)
+	}
+
+	role := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      mongoDBDatabaseSA,
+			Namespace: shop.Namespace,
+		},
+	}
+	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, role, func() error {
+		role.Rules = []rbacv1.PolicyRule{
+			{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"get"}},
+			{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"patch", "delete", "get"}},
+		}
+		return controllerutil.SetControllerReference(shop, role, r.Scheme)
+	}); err != nil {
+		return fmt.Errorf("upsert Role: %w", err)
+	}
+
+	rb := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      mongoDBDatabaseSA,
+			Namespace: shop.Namespace,
+		},
+	}
+	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, rb, func() error {
+		rb.RoleRef = rbacv1.RoleRef{
+			APIGroup: "rbac.authorization.k8s.io",
+			Kind:     "Role",
+			Name:     mongoDBDatabaseSA,
+		}
+		rb.Subjects = []rbacv1.Subject{{
+			Kind: "ServiceAccount",
+			Name: mongoDBDatabaseSA,
+		}}
+		return controllerutil.SetControllerReference(shop, rb, r.Scheme)
+	}); err != nil {
+		return fmt.Errorf("upsert RoleBinding: %w", err)
+	}
+	return nil
 }
 
 func (r *ShopReconciler) ensureDeployment(ctx context.Context, shop *appsv1.Shop, dbSecretName string) error {
@@ -244,6 +442,7 @@ func (r *ShopReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&k8sappsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&cnpgv1.Cluster{}).
+		Owns(&mongodbv1.MongoDBCommunity{}).
 		Named("apps-shop").
 		Complete(r)
 }
