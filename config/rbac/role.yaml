@@ -8,6 +8,7 @@ rules:
   - ""
   resources:
   - secrets
+  - serviceaccounts
   - services
   verbs:
   - create
@@ -55,6 +56,18 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - mongodbcommunity.mongodb.com
+  resources:
+  - mongodbcommunity
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
 - apiGroups:
   - notify.shophub.local
   resources:
@@ -111,6 +124,19 @@ rules:
   - postgresql.cnpg.io
   resources:
   - clusters
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - rolebindings
+  - roles
   verbs:
   - create
   - delete
