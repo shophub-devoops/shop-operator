@@ -373,6 +373,32 @@ func (r *ShopReconciler) ensureMongoDBRBAC(ctx context.Context, shop *appsv1.Sho
 	return nil
 }
 
+// dbEnvFromSecret returns the EnvVar slice that maps the database connection
+// string from the operator-managed Secret into a single DATABASE_URL env var
+// the Shop backend reads. The source key differs by DB kind: CNPG publishes
+// the connection string under "uri", MongoDB Community under
+// "connectionString.standard".
+func dbEnvFromSecret(kind appsv1.DatabaseKind, secretName string) []corev1.EnvVar {
+	var key string
+	switch kind {
+	case appsv1.DatabasePostgres:
+		key = "uri"
+	case appsv1.DatabaseMongoDB:
+		key = "connectionString.standard"
+	default:
+		return nil
+	}
+	return []corev1.EnvVar{{
+		Name: "DATABASE_URL",
+		ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+				Key:                  key,
+			},
+		},
+	}}
+}
+
 func (r *ShopReconciler) ensureDeployment(ctx context.Context, shop *appsv1.Shop, dbSecretName string) error {
 	image := defaultShopImage
 	if shop.Spec.Image != nil && *shop.Spec.Image != "" {
@@ -399,11 +425,27 @@ func (r *ShopReconciler) ensureDeployment(ctx context.Context, shop *appsv1.Shop
 					Ports: []corev1.ContainerPort{
 						{Name: "http", ContainerPort: int32(containerHTTPPort), Protocol: corev1.ProtocolTCP},
 					},
-					EnvFrom: []corev1.EnvFromSource{{
-						SecretRef: &corev1.SecretEnvSource{
-							LocalObjectReference: corev1.LocalObjectReference{Name: dbSecretName},
+					Env: dbEnvFromSecret(shop.Spec.Database, dbSecretName),
+					LivenessProbe: &corev1.Probe{
+						ProbeHandler: corev1.ProbeHandler{
+							HTTPGet: &corev1.HTTPGetAction{
+								Path: "/probe/liveness",
+								Port: intstr.FromString("http"),
+							},
 						},
-					}},
+						InitialDelaySeconds: 5,
+						PeriodSeconds:       10,
+					},
+					ReadinessProbe: &corev1.Probe{
+						ProbeHandler: corev1.ProbeHandler{
+							HTTPGet: &corev1.HTTPGetAction{
+								Path: "/probe/readiness",
+								Port: intstr.FromString("http"),
+							},
+						},
+						InitialDelaySeconds: 3,
+						PeriodSeconds:       5,
+					},
 				}},
 			},
 		}
