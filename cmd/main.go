@@ -37,6 +37,7 @@ import (
 
 	cnpgv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
 	mongodbv1 "github.com/mongodb/mongodb-kubernetes-operator/api/v1"
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 
 	appsv1 "github.com/shophub-devoops/shop-operator/api/apps/v1"
 	notifyv1 "github.com/shophub-devoops/shop-operator/api/notify/v1"
@@ -62,6 +63,7 @@ func init() {
 	// External types we manage child resources of.
 	utilruntime.Must(cnpgv1.AddToScheme(scheme))
 	utilruntime.Must(mongodbv1.AddToScheme(scheme))
+	utilruntime.Must(monitoringv1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
