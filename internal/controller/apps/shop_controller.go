@@ -54,8 +54,12 @@ const (
 	// Shop backend listens on 8080 (non-privileged, distroless-friendly).
 	// Service exposes the same 8080 so the Ingress and ServiceMonitor configs
 	// don't need port translation between layers.
-	containerHTTPPort   = 8080
-	serviceHTTPPort     = 8080
+	containerHTTPPort = 8080
+	serviceHTTPPort   = 8080
+	// appLabelKey is the Service / ServiceMonitor / Pod selector key.
+	appLabelKey = "app"
+	// httpPortName is the named port shared by container, Service and probes.
+	httpPortName        = "http"
 	databaseStorageSize = "1Gi"
 	mongoDBVersion      = "6.0.5"
 	mongoPasswordBytes  = 16
@@ -415,7 +419,7 @@ func (r *ShopReconciler) ensureDeployment(ctx context.Context, shop *appsv1.Shop
 		image = *shop.Spec.Image
 	}
 	replicas := replicasFor(shop)
-	labels := map[string]string{"app": shop.Name}
+	labels := map[string]string{appLabelKey: shop.Name}
 
 	dep := &k8sappsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -433,14 +437,14 @@ func (r *ShopReconciler) ensureDeployment(ctx context.Context, shop *appsv1.Shop
 					Name:  "shop",
 					Image: image,
 					Ports: []corev1.ContainerPort{
-						{Name: "http", ContainerPort: int32(containerHTTPPort), Protocol: corev1.ProtocolTCP},
+						{Name: httpPortName, ContainerPort: int32(containerHTTPPort), Protocol: corev1.ProtocolTCP},
 					},
 					Env: dbEnvFromSecret(shop.Spec.Database, dbSecretName),
 					LivenessProbe: &corev1.Probe{
 						ProbeHandler: corev1.ProbeHandler{
 							HTTPGet: &corev1.HTTPGetAction{
 								Path: "/probe/liveness",
-								Port: intstr.FromString("http"),
+								Port: intstr.FromString(httpPortName),
 							},
 						},
 						InitialDelaySeconds: 5,
@@ -450,7 +454,7 @@ func (r *ShopReconciler) ensureDeployment(ctx context.Context, shop *appsv1.Shop
 						ProbeHandler: corev1.ProbeHandler{
 							HTTPGet: &corev1.HTTPGetAction{
 								Path: "/probe/readiness",
-								Port: intstr.FromString("http"),
+								Port: intstr.FromString(httpPortName),
 							},
 						},
 						InitialDelaySeconds: 3,
@@ -477,13 +481,13 @@ func (r *ShopReconciler) ensureService(ctx context.Context, shop *appsv1.Shop) e
 		if svc.Labels == nil {
 			svc.Labels = map[string]string{}
 		}
-		svc.Labels["app"] = shop.Name
-		svc.Spec.Selector = map[string]string{"app": shop.Name}
+		svc.Labels[appLabelKey] = shop.Name
+		svc.Spec.Selector = map[string]string{appLabelKey: shop.Name}
 		svc.Spec.Type = corev1.ServiceTypeClusterIP
 		svc.Spec.Ports = []corev1.ServicePort{{
-			Name:       "http",
+			Name:       httpPortName,
 			Port:       int32(serviceHTTPPort),
-			TargetPort: intstr.FromString("http"),
+			TargetPort: intstr.FromString(httpPortName),
 			Protocol:   corev1.ProtocolTCP,
 		}}
 		return controllerutil.SetControllerReference(shop, svc, r.Scheme)
@@ -509,10 +513,10 @@ func (r *ShopReconciler) ensureServiceMonitor(ctx context.Context, shop *appsv1.
 		}
 		sm.Labels["release"] = "kube-prometheus-stack"
 		sm.Spec.Selector = metav1.LabelSelector{
-			MatchLabels: map[string]string{"app": shop.Name},
+			MatchLabels: map[string]string{appLabelKey: shop.Name},
 		}
 		sm.Spec.Endpoints = []monitoringv1.Endpoint{{
-			Port:     "http",
+			Port:     httpPortName,
 			Path:     "/metrics",
 			Interval: "15s",
 		}}
