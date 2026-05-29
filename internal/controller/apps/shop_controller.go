@@ -25,6 +25,7 @@ import (
 
 	cnpgv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
 	mongodbv1 "github.com/mongodb/mongodb-kubernetes-operator/api/v1"
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	k8sappsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -50,9 +51,15 @@ type ShopReconciler struct {
 const (
 	// Placeholder until Faza 3 produces a real Shop backend image.
 	defaultShopImage = "nginx:alpine"
-	// nginx:alpine listens on 80; Service exposes 8080 → "http" named port.
-	containerHTTPPort   = 80
-	serviceHTTPPort     = 8080
+	// Shop backend listens on 8080 (non-privileged, distroless-friendly).
+	// Service exposes the same 8080 so the Ingress and ServiceMonitor configs
+	// don't need port translation between layers.
+	containerHTTPPort = 8080
+	serviceHTTPPort   = 8080
+	// appLabelKey is the Service / ServiceMonitor / Pod selector key.
+	appLabelKey = "app"
+	// httpPortName is the named port shared by container, Service and probes.
+	httpPortName        = "http"
 	databaseStorageSize = "1Gi"
 	mongoDBVersion      = "6.0.5"
 	mongoPasswordBytes  = 16
@@ -71,6 +78,7 @@ const (
 // +kubebuilder:rbac:groups="",resources=services;secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=clusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=mongodbcommunity.mongodb.com,resources=mongodbcommunity,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch;delete
 
@@ -110,6 +118,12 @@ func (r *ShopReconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 
 	if err := r.ensureService(ctx, shop); err != nil {
 		return ctrl.Result{}, fmt.Errorf("ensureService: %w", err)
+	}
+
+	if err := r.ensureServiceMonitor(ctx, shop); err != nil {
+		// Cluster may not run the Prometheus operator. Log and continue —
+		// the Shop is still functional without observability discovery.
+		log.Info("ensureServiceMonitor skipped", "reason", err.Error())
 	}
 
 	if err := r.updateStatusFromDeployment(ctx, shop, dbSecretName); err != nil {
@@ -405,7 +419,7 @@ func (r *ShopReconciler) ensureDeployment(ctx context.Context, shop *appsv1.Shop
 		image = *shop.Spec.Image
 	}
 	replicas := replicasFor(shop)
-	labels := map[string]string{"app": shop.Name}
+	labels := map[string]string{appLabelKey: shop.Name}
 
 	dep := &k8sappsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -423,14 +437,14 @@ func (r *ShopReconciler) ensureDeployment(ctx context.Context, shop *appsv1.Shop
 					Name:  "shop",
 					Image: image,
 					Ports: []corev1.ContainerPort{
-						{Name: "http", ContainerPort: int32(containerHTTPPort), Protocol: corev1.ProtocolTCP},
+						{Name: httpPortName, ContainerPort: int32(containerHTTPPort), Protocol: corev1.ProtocolTCP},
 					},
 					Env: dbEnvFromSecret(shop.Spec.Database, dbSecretName),
 					LivenessProbe: &corev1.Probe{
 						ProbeHandler: corev1.ProbeHandler{
 							HTTPGet: &corev1.HTTPGetAction{
 								Path: "/probe/liveness",
-								Port: intstr.FromString("http"),
+								Port: intstr.FromString(httpPortName),
 							},
 						},
 						InitialDelaySeconds: 5,
@@ -440,7 +454,7 @@ func (r *ShopReconciler) ensureDeployment(ctx context.Context, shop *appsv1.Shop
 						ProbeHandler: corev1.ProbeHandler{
 							HTTPGet: &corev1.HTTPGetAction{
 								Path: "/probe/readiness",
-								Port: intstr.FromString("http"),
+								Port: intstr.FromString(httpPortName),
 							},
 						},
 						InitialDelaySeconds: 3,
@@ -462,15 +476,51 @@ func (r *ShopReconciler) ensureService(ctx context.Context, shop *appsv1.Shop) e
 		},
 	}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
-		svc.Spec.Selector = map[string]string{"app": shop.Name}
+		// The ServiceMonitor selector matches Service labels (not Spec.Selector),
+		// so the Service itself must carry "app: <shop>" for Prometheus discovery.
+		if svc.Labels == nil {
+			svc.Labels = map[string]string{}
+		}
+		svc.Labels[appLabelKey] = shop.Name
+		svc.Spec.Selector = map[string]string{appLabelKey: shop.Name}
 		svc.Spec.Type = corev1.ServiceTypeClusterIP
 		svc.Spec.Ports = []corev1.ServicePort{{
-			Name:       "http",
+			Name:       httpPortName,
 			Port:       int32(serviceHTTPPort),
-			TargetPort: intstr.FromString("http"),
+			TargetPort: intstr.FromString(httpPortName),
 			Protocol:   corev1.ProtocolTCP,
 		}}
 		return controllerutil.SetControllerReference(shop, svc, r.Scheme)
+	})
+	return err
+}
+
+// ensureServiceMonitor creates a Prometheus ServiceMonitor that targets the
+// Shop's Service. The `release: kube-prometheus-stack` label is what the
+// stack's Prometheus instance selects on by default; without it the stack
+// would ignore our SM. Kept best-effort because some clusters don't run the
+// Prometheus operator at all.
+func (r *ShopReconciler) ensureServiceMonitor(ctx context.Context, shop *appsv1.Shop) error {
+	sm := &monitoringv1.ServiceMonitor{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      shop.Name,
+			Namespace: shop.Namespace,
+		},
+	}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, sm, func() error {
+		if sm.Labels == nil {
+			sm.Labels = map[string]string{}
+		}
+		sm.Labels["release"] = "kube-prometheus-stack"
+		sm.Spec.Selector = metav1.LabelSelector{
+			MatchLabels: map[string]string{appLabelKey: shop.Name},
+		}
+		sm.Spec.Endpoints = []monitoringv1.Endpoint{{
+			Port:     httpPortName,
+			Path:     "/metrics",
+			Interval: "15s",
+		}}
+		return controllerutil.SetControllerReference(shop, sm, r.Scheme)
 	})
 	return err
 }
