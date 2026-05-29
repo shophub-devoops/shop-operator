@@ -137,6 +137,29 @@ func (r *ShopReconciler) ensureDatabase(ctx context.Context, shop *appsv1.Shop) 
 	}
 }
 
+// postInitSQL returns the application schema (items, orders) that CNPG runs once
+// during cluster bootstrap. OWNER TO is double-quoted because DNS-1123 Shop
+// names may contain hyphens, which are invalid in unquoted Postgres identifiers.
+func postInitSQL(owner string) []string {
+	return []string{
+		`CREATE TABLE IF NOT EXISTS items (
+			id text PRIMARY KEY,
+			name text NOT NULL,
+			price_usdt numeric(36,18) NOT NULL,
+			stock int NOT NULL DEFAULT 0
+		)`,
+		`ALTER TABLE items OWNER TO "` + owner + `"`,
+		`CREATE TABLE IF NOT EXISTS orders (
+			id text PRIMARY KEY,
+			buyer_wallet text NOT NULL,
+			tx_hash text,
+			amount_usdt numeric(36,18) NOT NULL,
+			created_at timestamptz DEFAULT now()
+		)`,
+		`ALTER TABLE orders OWNER TO "` + owner + `"`,
+	}
+}
+
 // ensurePostgresDatabase creates a CNPG Cluster (if absent) and waits for the
 // auto-generated <shop-name>-app Secret that CNPG publishes after bootstrap.
 func (r *ShopReconciler) ensurePostgresDatabase(ctx context.Context, shop *appsv1.Shop) (string, error) {
@@ -149,8 +172,9 @@ func (r *ShopReconciler) ensurePostgresDatabase(ctx context.Context, shop *appsv
 			Instances: 1,
 			Bootstrap: &cnpgv1.BootstrapConfiguration{
 				InitDB: &cnpgv1.BootstrapInitDB{
-					Database: shop.Name,
-					Owner:    shop.Name,
+					Database:               shop.Name,
+					Owner:                  shop.Name,
+					PostInitApplicationSQL: postInitSQL(shop.Name),
 				},
 			},
 			StorageConfiguration: cnpgv1.StorageConfiguration{
