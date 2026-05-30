@@ -71,6 +71,7 @@ rules:
 - apiGroups:
   - monitoring.coreos.com
   resources:
+  - alertmanagerconfigs
   - servicemonitors
   verbs:
   - create

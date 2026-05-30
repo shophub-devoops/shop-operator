@@ -26,6 +26,7 @@ import (
 	cnpgv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
 	mongodbv1 "github.com/mongodb/mongodb-kubernetes-operator/api/v1"
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
+	monitoringv1alpha1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1alpha1"
 	k8sappsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -59,7 +60,10 @@ const (
 	// appLabelKey is the Service / ServiceMonitor / Pod selector key.
 	appLabelKey = "app"
 	// httpPortName is the named port shared by container, Service and probes.
-	httpPortName        = "http"
+	httpPortName = "http"
+	// discordWebhookKey is the Secret key holding the Discord webhook URL, as
+	// written by the DiscordChannel controller (notify.webhookURLField).
+	discordWebhookKey   = "webhook-url"
 	databaseStorageSize = "1Gi"
 	mongoDBVersion      = "6.0.5"
 	mongoPasswordBytes  = 16
@@ -79,6 +83,7 @@ const (
 // +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=clusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=mongodbcommunity.mongodb.com,resources=mongodbcommunity,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=monitoring.coreos.com,resources=alertmanagerconfigs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch;delete
 
@@ -124,6 +129,12 @@ func (r *ShopReconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		// Cluster may not run the Prometheus operator. Log and continue —
 		// the Shop is still functional without observability discovery.
 		log.Info("ensureServiceMonitor skipped", "reason", err.Error())
+	}
+
+	if err := r.ensureAlertmanagerConfig(ctx, shop); err != nil {
+		// Best-effort: missing Discord webhook ref or no Prometheus operator
+		// shouldn't block the Shop. Alerts just won't route to Discord.
+		log.Info("ensureAlertmanagerConfig skipped", "reason", err.Error())
 	}
 
 	if err := r.updateStatusFromDeployment(ctx, shop, dbSecretName); err != nil {
@@ -521,6 +532,50 @@ func (r *ShopReconciler) ensureServiceMonitor(ctx context.Context, shop *appsv1.
 			Interval: "15s",
 		}}
 		return controllerutil.SetControllerReference(shop, sm, r.Scheme)
+	})
+	return err
+}
+
+// ensureAlertmanagerConfig creates an AlertmanagerConfig that routes this Shop's
+// alerts to its Discord channel, when the Shop references a webhook Secret.
+// The stack's Alertmanager selects it (alertmanagerConfigSelector) and, with the
+// OnNamespace matcher strategy, auto-scopes its routes to the Shop's namespace —
+// so only this Shop's alerts reach this Shop's Discord webhook. The apiURL
+// secret-ref keeps the webhook URL out of the rendered config / git.
+func (r *ShopReconciler) ensureAlertmanagerConfig(ctx context.Context, shop *appsv1.Shop) error {
+	if shop.Spec.DiscordWebhookSecretRef == nil {
+		return nil
+	}
+	sendResolved := true
+	ac := &monitoringv1alpha1.AlertmanagerConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      shop.Name,
+			Namespace: shop.Namespace,
+		},
+	}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, ac, func() error {
+		ac.Spec = monitoringv1alpha1.AlertmanagerConfigSpec{
+			Route: &monitoringv1alpha1.Route{
+				Receiver:       "discord",
+				GroupBy:        []string{"alertname"},
+				GroupWait:      "30s",
+				GroupInterval:  "5m",
+				RepeatInterval: "1h",
+			},
+			Receivers: []monitoringv1alpha1.Receiver{{
+				Name: "discord",
+				DiscordConfigs: []monitoringv1alpha1.DiscordConfig{{
+					APIURL: corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{
+							Name: shop.Spec.DiscordWebhookSecretRef.Name,
+						},
+						Key: discordWebhookKey,
+					},
+					SendResolved: &sendResolved,
+				}},
+			}},
+		}
+		return controllerutil.SetControllerReference(shop, ac, r.Scheme)
 	})
 	return err
 }
