@@ -31,6 +31,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -76,6 +77,13 @@ const (
 	// it (plus its Role + RoleBinding) in every tenant namespace where we want
 	// MongoDBCommunity to actually schedule Pods.
 	mongoDBDatabaseSA = "mongodb-database"
+
+	// Status condition types (Available/Progressing/Degraded taxonomy).
+	condAvailable   = "Available"
+	condProgressing = "Progressing"
+	condDegraded    = "Degraded"
+	// reasonReady is the condition Reason used once the Shop is fully up.
+	reasonReady = "Ready"
 )
 
 // +kubebuilder:rbac:groups=apps.shophub.local,resources=shops,verbs=get;list;watch;create;update;patch;delete
@@ -112,11 +120,19 @@ func (r *ShopReconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	dbSecretName, err := r.ensureDatabase(ctx, shop)
 	if err != nil {
 		log.Error(err, "ensureDatabase failed")
+		_ = r.setConditions(ctx, shop,
+			cond(condDegraded, metav1.ConditionTrue, "DatabaseFailed", err.Error()),
+			cond(condAvailable, metav1.ConditionFalse, "DatabaseFailed", "database provisioning failed"),
+		)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	if dbSecretName == "" {
 		// CNPG hasn't published the app Secret yet — wait and retry.
 		log.Info("database secret not ready, requeueing")
+		_ = r.setConditions(ctx, shop,
+			cond(condProgressing, metav1.ConditionTrue, "DatabaseProvisioning", "waiting for database connection secret"),
+			cond(condAvailable, metav1.ConditionFalse, "DatabaseProvisioning", "database not ready"),
+		)
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
@@ -593,6 +609,29 @@ func (r *ShopReconciler) ensureAlertmanagerConfig(ctx context.Context, shop *app
 	return err
 }
 
+// cond builds a status Condition; ObservedGeneration is filled in by setConditions.
+func cond(condType string, status metav1.ConditionStatus, reason, msg string) metav1.Condition {
+	return metav1.Condition{Type: condType, Status: status, Reason: reason, Message: msg}
+}
+
+// setConditions applies the given conditions and persists the Shop status.
+// meta.SetStatusCondition only bumps LastTransitionTime on a real state change,
+// so the conditions reflect genuine transitions. Conflicts are benign — the next
+// reconcile re-applies.
+func (r *ShopReconciler) setConditions(ctx context.Context, shop *appsv1.Shop, conds ...metav1.Condition) error {
+	for _, c := range conds {
+		c.ObservedGeneration = shop.Generation
+		meta.SetStatusCondition(&shop.Status.Conditions, c)
+	}
+	if err := r.Status().Update(ctx, shop); err != nil {
+		if apierrors.IsConflict(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
 func (r *ShopReconciler) updateStatusFromDeployment(ctx context.Context, shop *appsv1.Shop, dbSecretName string) error {
 	dep := &k8sappsv1.Deployment{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: shop.Namespace, Name: shop.Name}, dep); err != nil {
@@ -602,14 +641,19 @@ func (r *ShopReconciler) updateStatusFromDeployment(ctx context.Context, shop *a
 	shop.Status.ReadyReplicas = dep.Status.ReadyReplicas
 	shop.Status.DatabaseSecret = dbSecretName
 
-	if err := r.Status().Update(ctx, shop); err != nil {
-		if apierrors.IsConflict(err) {
-			// Stale resourceVersion — controller will reconcile again shortly.
-			return nil
-		}
-		return err
+	desired := replicasFor(shop)
+	if dep.Status.ReadyReplicas >= desired {
+		return r.setConditions(ctx, shop,
+			cond(condAvailable, metav1.ConditionTrue, reasonReady, "all replicas are ready"),
+			cond(condProgressing, metav1.ConditionFalse, reasonReady, "deployment complete"),
+			cond(condDegraded, metav1.ConditionFalse, reasonReady, "no errors"),
+		)
 	}
-	return nil
+	return r.setConditions(ctx, shop,
+		cond(condAvailable, metav1.ConditionFalse, "Deploying",
+			fmt.Sprintf("%d/%d replicas ready", dep.Status.ReadyReplicas, desired)),
+		cond(condProgressing, metav1.ConditionTrue, "Deploying", "waiting for replicas to become ready"),
+	)
 }
 
 func replicasFor(shop *appsv1.Shop) int32 {
