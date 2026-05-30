@@ -34,12 +34,17 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	appsv1 "github.com/shophub-devoops/shop-operator/api/apps/v1"
 )
@@ -84,6 +89,13 @@ const (
 	condDegraded    = "Degraded"
 	// reasonReady is the condition Reason used once the Shop is fully up.
 	reasonReady = "Ready"
+
+	// cnpgClusterLabel is the label CNPG puts on the resources it generates
+	// (including the <shop>-app connection Secret); its value is the cluster name.
+	cnpgClusterLabel = "cnpg.io/cluster"
+	// discordWebhookRefField indexes Shops by the Discord webhook Secret they
+	// reference, for O(1) "which Shops use this Secret?" lookups on Secret events.
+	discordWebhookRefField = ".spec.discordWebhookSecretRef.name"
 )
 
 // +kubebuilder:rbac:groups=apps.shophub.local,resources=shops,verbs=get;list;watch;create;update;patch;delete
@@ -663,14 +675,75 @@ func replicasFor(shop *appsv1.Shop) int32 {
 	return 2
 }
 
+// hasCNPGClusterLabel passes only Secrets CNPG generated, so the Secret watch
+// doesn't wake the controller on every Secret in the cluster.
+func hasCNPGClusterLabel(o client.Object) bool {
+	_, ok := o.GetLabels()[cnpgClusterLabel]
+	return ok
+}
+
+// shopForCNPGSecret maps a CNPG-generated Secret to its owning Shop. CNPG names
+// the cluster after the Shop, so the cnpg.io/cluster label value IS the Shop
+// name in the same namespace.
+func (r *ShopReconciler) shopForCNPGSecret(_ context.Context, obj client.Object) []reconcile.Request {
+	cluster := obj.GetLabels()[cnpgClusterLabel]
+	if cluster == "" {
+		return nil
+	}
+	return []reconcile.Request{{
+		NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: cluster},
+	}}
+}
+
+// shopsForWebhookSecret answers "which Shops reference this Secret as their
+// Discord webhook?" via the FieldIndexer (O(1)), enqueuing only those Shops.
+func (r *ShopReconciler) shopsForWebhookSecret(ctx context.Context, obj client.Object) []reconcile.Request {
+	var shops appsv1.ShopList
+	if err := r.List(ctx, &shops,
+		client.InNamespace(obj.GetNamespace()),
+		client.MatchingFields{discordWebhookRefField: obj.GetName()},
+	); err != nil {
+		return nil
+	}
+	reqs := make([]reconcile.Request, 0, len(shops.Items))
+	for i := range shops.Items {
+		reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{
+			Namespace: shops.Items[i].Namespace,
+			Name:      shops.Items[i].Name,
+		}})
+	}
+	return reqs
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *ShopReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// D4: index Shops by their referenced Discord webhook Secret name so the
+	// Secret watch below can find affected Shops in O(1).
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &appsv1.Shop{}, discordWebhookRefField,
+		func(obj client.Object) []string {
+			shop, ok := obj.(*appsv1.Shop)
+			if !ok || shop.Spec.DiscordWebhookSecretRef == nil {
+				return nil
+			}
+			return []string{shop.Spec.DiscordWebhookSecretRef.Name}
+		}); err != nil {
+		return err
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&appsv1.Shop{}).
 		Owns(&k8sappsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&cnpgv1.Cluster{}).
 		Owns(&mongodbv1.MongoDBCommunity{}).
+		// D3: react the moment CNPG publishes the <shop>-app Secret (predicate
+		// keeps us off unrelated Secrets) instead of waiting for the requeue.
+		Watches(&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(r.shopForCNPGSecret),
+			builder.WithPredicates(predicate.NewPredicateFuncs(hasCNPGClusterLabel))).
+		// D4: re-reconcile Shops when their Discord webhook Secret changes.
+		Watches(&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(r.shopsForWebhookSecret)).
 		Named("apps-shop").
 		Complete(r)
 }
