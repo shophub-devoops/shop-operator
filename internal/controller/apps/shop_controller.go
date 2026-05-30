@@ -63,7 +63,10 @@ const (
 	httpPortName = "http"
 	// discordWebhookKey is the Secret key holding the Discord webhook URL, as
 	// written by the DiscordChannel controller (notify.webhookURLField).
-	discordWebhookKey   = "webhook-url"
+	discordWebhookKey = "webhook-url"
+	// tempoOTLPEndpoint is the in-cluster Tempo OTLP/HTTP receiver the Shop
+	// backend exports spans to (installed from kube-state clusters/local/tempo).
+	tempoOTLPEndpoint   = "http://tempo.monitoring.svc.cluster.local:4318"
 	databaseStorageSize = "1Gi"
 	mongoDBVersion      = "6.0.5"
 	mongoPasswordBytes  = 16
@@ -424,6 +427,16 @@ func dbEnvFromSecret(kind appsv1.DatabaseKind, secretName string) []corev1.EnvVa
 	}}
 }
 
+// shopEnv is the full container env: the DATABASE_URL secret-ref plus the OTLP
+// tracing config pointing the backend at the in-cluster Tempo. OTEL_SERVICE_NAME
+// is the shop name so traces are grouped per tenant.
+func shopEnv(shop *appsv1.Shop, dbSecretName string) []corev1.EnvVar {
+	return append(dbEnvFromSecret(shop.Spec.Database, dbSecretName),
+		corev1.EnvVar{Name: "OTEL_EXPORTER_OTLP_ENDPOINT", Value: tempoOTLPEndpoint},
+		corev1.EnvVar{Name: "OTEL_SERVICE_NAME", Value: shop.Name},
+	)
+}
+
 func (r *ShopReconciler) ensureDeployment(ctx context.Context, shop *appsv1.Shop, dbSecretName string) error {
 	image := defaultShopImage
 	if shop.Spec.Image != nil && *shop.Spec.Image != "" {
@@ -450,7 +463,7 @@ func (r *ShopReconciler) ensureDeployment(ctx context.Context, shop *appsv1.Shop
 					Ports: []corev1.ContainerPort{
 						{Name: httpPortName, ContainerPort: int32(containerHTTPPort), Protocol: corev1.ProtocolTCP},
 					},
-					Env: dbEnvFromSecret(shop.Spec.Database, dbSecretName),
+					Env: shopEnv(shop, dbSecretName),
 					LivenessProbe: &corev1.Probe{
 						ProbeHandler: corev1.ProbeHandler{
 							HTTPGet: &corev1.HTTPGetAction{
