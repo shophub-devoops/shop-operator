@@ -163,7 +163,7 @@ func TestReconcileCreatesWorkloadAndConditions(t *testing.T) {
 	for _, e := range ctr.Env {
 		envNames[e.Name] = true
 	}
-	for _, want := range []string{envDatabaseURL, envOTLPEndpoint, envOTELService} {
+	for _, want := range []string{envDatabaseURL, envOTLPEndpoint, envOTELService, envWalletAddress} {
 		if !envNames[want] {
 			t.Errorf("deployment env missing %s", want)
 		}
