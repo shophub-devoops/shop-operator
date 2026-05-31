@@ -87,9 +87,17 @@ const (
 	condAvailable   = "Available"
 	condProgressing = "Progressing"
 	condDegraded    = "Degraded"
-	// reasonReady is the condition Reason used once the Shop is fully up.
-	reasonReady = "Ready"
+	// Condition Reasons.
+	reasonReady     = "Ready"
+	reasonDeploying = "Deploying"
 
+	// Database connection env var name + the Secret keys each operator publishes.
+	envDatabaseURL = "DATABASE_URL"
+	cnpgURIKey     = "uri"
+	mongoURIKey    = "connectionString.standard"
+	// OTLP tracing env var names the Shop backend reads.
+	envOTLPEndpoint = "OTEL_EXPORTER_OTLP_ENDPOINT"
+	envOTELService  = "OTEL_SERVICE_NAME"
 	// cnpgClusterLabel is the label CNPG puts on the resources it generates
 	// (including the <shop>-app connection Secret); its value is the cluster name.
 	cnpgClusterLabel = "cnpg.io/cluster"
@@ -438,14 +446,14 @@ func dbEnvFromSecret(kind appsv1.DatabaseKind, secretName string) []corev1.EnvVa
 	var key string
 	switch kind {
 	case appsv1.DatabasePostgres:
-		key = "uri"
+		key = cnpgURIKey
 	case appsv1.DatabaseMongoDB:
-		key = "connectionString.standard"
+		key = mongoURIKey
 	default:
 		return nil
 	}
 	return []corev1.EnvVar{{
-		Name: "DATABASE_URL",
+		Name: envDatabaseURL,
 		ValueFrom: &corev1.EnvVarSource{
 			SecretKeyRef: &corev1.SecretKeySelector{
 				LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
@@ -460,8 +468,8 @@ func dbEnvFromSecret(kind appsv1.DatabaseKind, secretName string) []corev1.EnvVa
 // is the shop name so traces are grouped per tenant.
 func shopEnv(shop *appsv1.Shop, dbSecretName string) []corev1.EnvVar {
 	return append(dbEnvFromSecret(shop.Spec.Database, dbSecretName),
-		corev1.EnvVar{Name: "OTEL_EXPORTER_OTLP_ENDPOINT", Value: tempoOTLPEndpoint},
-		corev1.EnvVar{Name: "OTEL_SERVICE_NAME", Value: shop.Name},
+		corev1.EnvVar{Name: envOTLPEndpoint, Value: tempoOTLPEndpoint},
+		corev1.EnvVar{Name: envOTELService, Value: shop.Name},
 	)
 }
 
@@ -662,9 +670,9 @@ func (r *ShopReconciler) updateStatusFromDeployment(ctx context.Context, shop *a
 		)
 	}
 	return r.setConditions(ctx, shop,
-		cond(condAvailable, metav1.ConditionFalse, "Deploying",
+		cond(condAvailable, metav1.ConditionFalse, reasonDeploying,
 			fmt.Sprintf("%d/%d replicas ready", dep.Status.ReadyReplicas, desired)),
-		cond(condProgressing, metav1.ConditionTrue, "Deploying", "waiting for replicas to become ready"),
+		cond(condProgressing, metav1.ConditionTrue, reasonDeploying, "waiting for replicas to become ready"),
 	)
 }
 
