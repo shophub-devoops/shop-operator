@@ -94,6 +94,13 @@ spec:
                   Image overrides the default Shop container image.
                   Used by CI/CD to bump shop image without touching the operator chart.
                 type: string
+              replicas:
+                description: |-
+                  Replicas overrides the availability-derived replica count. When set
+                  (e.g. by `kubectl scale shop` or an HPA via the scale subresource) it
+                  wins; when nil, Availability decides.
+                format: int32
+                type: integer
               title:
                 description: Title is the storefront display name shown to buyers.
                 type: string
@@ -181,6 +188,11 @@ spec:
                 description: ReadyReplicas mirrors the Deployment's readyReplicas.
                 format: int32
                 type: integer
+              selector:
+                description: |-
+                  Selector is the label selector for the Shop's pods, as a string. The
+                  scale subresource exposes it so an HPA can find the pods it scales.
+                type: string
               url:
                 description: URL is the ingress hostname where the storefront is reachable.
                 type: string
@@ -191,4 +203,8 @@ spec:
     served: true
     storage: true
     subresources:
+      scale:
+        labelSelectorPath: .status.selector
+        specReplicasPath: .spec.replicas
+        statusReplicasPath: .status.readyReplicas
       status: {}

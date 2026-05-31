@@ -48,6 +48,12 @@ type ShopSpec struct {
 	// +kubebuilder:default:=standard
 	Availability Availability `json:"availability"`
 
+	// Replicas overrides the availability-derived replica count. When set
+	// (e.g. by `kubectl scale shop` or an HPA via the scale subresource) it
+	// wins; when nil, Availability decides.
+	// +optional
+	Replicas *int32 `json:"replicas,omitempty"`
+
 	// Database picks the DB operator that provisions persistence for this shop.
 	// +kubebuilder:default:=postgres
 	Database DatabaseKind `json:"database"`
@@ -87,10 +93,16 @@ type ShopStatus struct {
 	// ReadyReplicas mirrors the Deployment's readyReplicas.
 	// +optional
 	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
+
+	// Selector is the label selector for the Shop's pods, as a string. The
+	// scale subresource exposes it so an HPA can find the pods it scales.
+	// +optional
+	Selector string `json:"selector,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.readyReplicas,selectorpath=.status.selector
 // +kubebuilder:resource:shortName=sh,categories={shophub}
 // +kubebuilder:printcolumn:name="TITLE",type="string",JSONPath=".spec.title"
 // +kubebuilder:printcolumn:name="DB",type="string",JSONPath=".spec.database"
