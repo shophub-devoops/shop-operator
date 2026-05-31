@@ -98,6 +98,9 @@ const (
 	// OTLP tracing env var names the Shop backend reads.
 	envOTLPEndpoint = "OTEL_EXPORTER_OTLP_ENDPOINT"
 	envOTELService  = "OTEL_SERVICE_NAME"
+	// envWalletAddress is the shop's on-chain payment recipient (D12); the
+	// backend verifies USDT transfers land here.
+	envWalletAddress = "WALLET_ADDRESS"
 	// cnpgClusterLabel is the label CNPG puts on the resources it generates
 	// (including the <shop>-app connection Secret); its value is the cluster name.
 	cnpgClusterLabel = "cnpg.io/cluster"
@@ -470,6 +473,7 @@ func shopEnv(shop *appsv1.Shop, dbSecretName string) []corev1.EnvVar {
 	return append(dbEnvFromSecret(shop.Spec.Database, dbSecretName),
 		corev1.EnvVar{Name: envOTLPEndpoint, Value: tempoOTLPEndpoint},
 		corev1.EnvVar{Name: envOTELService, Value: shop.Name},
+		corev1.EnvVar{Name: envWalletAddress, Value: shop.Spec.WalletAddress},
 	)
 }
 
