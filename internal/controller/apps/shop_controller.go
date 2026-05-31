@@ -660,6 +660,8 @@ func (r *ShopReconciler) updateStatusFromDeployment(ctx context.Context, shop *a
 
 	shop.Status.ReadyReplicas = dep.Status.ReadyReplicas
 	shop.Status.DatabaseSecret = dbSecretName
+	// Selector lets the scale subresource (and any HPA) find the Shop's pods.
+	shop.Status.Selector = appLabelKey + "=" + shop.Name
 
 	desired := replicasFor(shop)
 	if dep.Status.ReadyReplicas >= desired {
@@ -677,6 +679,11 @@ func (r *ShopReconciler) updateStatusFromDeployment(ctx context.Context, shop *a
 }
 
 func replicasFor(shop *appsv1.Shop) int32 {
+	// An explicit replica count (kubectl scale / HPA via the scale subresource)
+	// wins over the availability-derived default.
+	if shop.Spec.Replicas != nil {
+		return *shop.Spec.Replicas
+	}
 	if shop.Spec.Availability == appsv1.AvailabilityHigh {
 		return 3
 	}

@@ -55,6 +55,11 @@ func TestReplicasFor(t *testing.T) {
 	if got := replicasFor(&appsv1.Shop{Spec: appsv1.ShopSpec{Availability: appsv1.AvailabilityHigh}}); got != 3 {
 		t.Errorf("high replicas = %d, want 3", got)
 	}
+	// An explicit replica count (scale subresource / HPA) overrides availability.
+	five := int32(5)
+	if got := replicasFor(&appsv1.Shop{Spec: appsv1.ShopSpec{Availability: appsv1.AvailabilityHigh, Replicas: &five}}); got != 5 {
+		t.Errorf("explicit replicas = %d, want 5", got)
+	}
 }
 
 func TestDbEnvFromSecret(t *testing.T) {
