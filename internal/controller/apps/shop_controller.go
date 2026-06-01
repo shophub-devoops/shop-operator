@@ -21,6 +21,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"time"
 
 	cnpgv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
@@ -56,8 +57,6 @@ type ShopReconciler struct {
 }
 
 const (
-	// Placeholder until Faza 3 produces a real Shop backend image.
-	defaultShopImage = "nginx:alpine"
 	// Shop backend listens on 8080 (non-privileged, distroless-friendly).
 	// Service exposes the same 8080 so the Ingress and ServiceMonitor configs
 	// don't need port translation between layers.
@@ -477,8 +476,18 @@ func shopEnv(shop *appsv1.Shop, dbSecretName string) []corev1.EnvVar {
 	)
 }
 
+// defaultShopImage is used for Shops that don't pin spec.image. Configurable via
+// DEFAULT_SHOP_IMAGE (set by the operator chart) so it points at the published
+// unified Shop image (backend + storefront); falls back to the public :main tag.
+func defaultShopImage() string {
+	if v := os.Getenv("DEFAULT_SHOP_IMAGE"); v != "" {
+		return v
+	}
+	return "docker.io/urospetraskovic/shop-backend:main"
+}
+
 func (r *ShopReconciler) ensureDeployment(ctx context.Context, shop *appsv1.Shop, dbSecretName string) error {
-	image := defaultShopImage
+	image := defaultShopImage()
 	if shop.Spec.Image != nil && *shop.Spec.Image != "" {
 		image = *shop.Spec.Image
 	}
