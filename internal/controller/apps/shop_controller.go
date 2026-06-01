@@ -494,6 +494,13 @@ func ingressHost(shop *appsv1.Shop) string {
 	return shop.Name + "." + ingressBaseDomain()
 }
 
+// ingressURLPort is an optional ":port" suffix for Status.URL when ingress is
+// exposed on a non-standard host port (e.g. k3d maps cluster :80 to host :8080).
+// The Ingress Host itself never carries a port.
+func ingressURLPort() string {
+	return os.Getenv("INGRESS_URL_PORT")
+}
+
 // ensureIngress exposes the Shop storefront so an admin can click through to the
 // live site (spec 1.2): routes host <name>.<base-domain> to the Shop Service.
 func (r *ShopReconciler) ensureIngress(ctx context.Context, shop *appsv1.Shop) error {
@@ -725,7 +732,7 @@ func (r *ShopReconciler) updateStatusFromDeployment(ctx context.Context, shop *a
 	shop.Status.DatabaseSecret = dbSecretName
 	// Selector lets the scale subresource (and any HPA) find the Shop's pods.
 	shop.Status.Selector = appLabelKey + "=" + shop.Name
-	shop.Status.URL = "http://" + ingressHost(shop)
+	shop.Status.URL = "http://" + ingressHost(shop) + ingressURLPort()
 
 	desired := replicasFor(shop)
 	if dep.Status.ReadyReplicas >= desired {
