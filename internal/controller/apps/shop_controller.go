@@ -21,6 +21,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"time"
 
 	cnpgv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
@@ -29,6 +30,7 @@ import (
 	monitoringv1alpha1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1alpha1"
 	k8sappsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -56,8 +58,6 @@ type ShopReconciler struct {
 }
 
 const (
-	// Placeholder until Faza 3 produces a real Shop backend image.
-	defaultShopImage = "nginx:alpine"
 	// Shop backend listens on 8080 (non-privileged, distroless-friendly).
 	// Service exposes the same 8080 so the Ingress and ServiceMonitor configs
 	// don't need port translation between layers.
@@ -114,6 +114,7 @@ const (
 // +kubebuilder:rbac:groups=apps.shophub.local,resources=shops/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services;secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=postgresql.cnpg.io,resources=clusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=mongodbcommunity.mongodb.com,resources=mongodbcommunity,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;create;update;patch;delete
@@ -165,6 +166,10 @@ func (r *ShopReconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 
 	if err := r.ensureService(ctx, shop); err != nil {
 		return ctrl.Result{}, fmt.Errorf("ensureService: %w", err)
+	}
+
+	if err := r.ensureIngress(ctx, shop); err != nil {
+		return ctrl.Result{}, fmt.Errorf("ensureIngress: %w", err)
 	}
 
 	if err := r.ensureServiceMonitor(ctx, shop); err != nil {
@@ -477,8 +482,69 @@ func shopEnv(shop *appsv1.Shop, dbSecretName string) []corev1.EnvVar {
 	)
 }
 
+func ingressBaseDomain() string {
+	if v := os.Getenv("INGRESS_BASE_DOMAIN"); v != "" {
+		return v
+	}
+	return "localhost"
+}
+
+// ingressHost is the external hostname for a Shop: "<name>.<base-domain>".
+func ingressHost(shop *appsv1.Shop) string {
+	return shop.Name + "." + ingressBaseDomain()
+}
+
+// ingressURLPort is an optional ":port" suffix for Status.URL when ingress is
+// exposed on a non-standard host port (e.g. k3d maps cluster :80 to host :8080).
+// The Ingress Host itself never carries a port.
+func ingressURLPort() string {
+	return os.Getenv("INGRESS_URL_PORT")
+}
+
+// ensureIngress exposes the Shop storefront so an admin can click through to the
+// live site (spec 1.2): routes host <name>.<base-domain> to the Shop Service.
+func (r *ShopReconciler) ensureIngress(ctx context.Context, shop *appsv1.Shop) error {
+	pathType := networkingv1.PathTypePrefix
+	ing := &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{Name: shop.Name, Namespace: shop.Namespace},
+	}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, ing, func() error {
+		ing.Spec = networkingv1.IngressSpec{
+			Rules: []networkingv1.IngressRule{{
+				Host: ingressHost(shop),
+				IngressRuleValue: networkingv1.IngressRuleValue{
+					HTTP: &networkingv1.HTTPIngressRuleValue{
+						Paths: []networkingv1.HTTPIngressPath{{
+							Path:     "/",
+							PathType: &pathType,
+							Backend: networkingv1.IngressBackend{
+								Service: &networkingv1.IngressServiceBackend{
+									Name: shop.Name,
+									Port: networkingv1.ServiceBackendPort{Number: serviceHTTPPort},
+								},
+							},
+						}},
+					},
+				},
+			}},
+		}
+		return controllerutil.SetControllerReference(shop, ing, r.Scheme)
+	})
+	return err
+}
+
+// defaultShopImage is used for Shops that don't pin spec.image. Configurable via
+// DEFAULT_SHOP_IMAGE (set by the operator chart) so it points at the published
+// unified Shop image (backend + storefront); falls back to the public :main tag.
+func defaultShopImage() string {
+	if v := os.Getenv("DEFAULT_SHOP_IMAGE"); v != "" {
+		return v
+	}
+	return "docker.io/urospetraskovic/shop-backend:main"
+}
+
 func (r *ShopReconciler) ensureDeployment(ctx context.Context, shop *appsv1.Shop, dbSecretName string) error {
-	image := defaultShopImage
+	image := defaultShopImage()
 	if shop.Spec.Image != nil && *shop.Spec.Image != "" {
 		image = *shop.Spec.Image
 	}
@@ -666,6 +732,7 @@ func (r *ShopReconciler) updateStatusFromDeployment(ctx context.Context, shop *a
 	shop.Status.DatabaseSecret = dbSecretName
 	// Selector lets the scale subresource (and any HPA) find the Shop's pods.
 	shop.Status.Selector = appLabelKey + "=" + shop.Name
+	shop.Status.URL = "http://" + ingressHost(shop) + ingressURLPort()
 
 	desired := replicasFor(shop)
 	if dep.Status.ReadyReplicas >= desired {
