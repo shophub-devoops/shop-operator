@@ -101,6 +101,12 @@ const (
 	// envWalletAddress is the shop's on-chain payment recipient (D12); the
 	// backend verifies USDT transfers land here.
 	envWalletAddress = "WALLET_ADDRESS"
+	// envShopDBName names the database the backend's Mongo client should use.
+	// Unlike a Postgres URI, the Mongo connection string the community operator
+	// publishes carries no default database, so the backend reads it from here.
+	// Ignored by the Postgres path. Set to the Shop name (the DB the operator
+	// provisions for this tenant).
+	envShopDBName = "SHOP_DB_NAME"
 	// cnpgClusterLabel is the label CNPG puts on the resources it generates
 	// (including the <shop>-app connection Secret); its value is the cluster name.
 	cnpgClusterLabel = "cnpg.io/cluster"
@@ -479,6 +485,7 @@ func shopEnv(shop *appsv1.Shop, dbSecretName string) []corev1.EnvVar {
 		corev1.EnvVar{Name: envOTLPEndpoint, Value: tempoOTLPEndpoint},
 		corev1.EnvVar{Name: envOTELService, Value: shop.Name},
 		corev1.EnvVar{Name: envWalletAddress, Value: shop.Spec.WalletAddress},
+		corev1.EnvVar{Name: envShopDBName, Value: shop.Name},
 	)
 }
 
