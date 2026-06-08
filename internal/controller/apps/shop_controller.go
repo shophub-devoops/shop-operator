@@ -19,9 +19,12 @@ package apps
 import (
 	"context"
 	"crypto/rand"
+	_ "embed"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	cnpgv1 "github.com/cloudnative-pg/cloudnative-pg/api/v1"
@@ -127,6 +130,7 @@ const (
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=alertmanagerconfigs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;patch;delete
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch;delete
 
 func (r *ShopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -183,6 +187,11 @@ func (r *ShopReconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		// Cluster may not run the Prometheus operator. Log and continue —
 		// the Shop is still functional without observability discovery.
 		log.Info("ensureServiceMonitor skipped", "reason", err.Error())
+	}
+
+	if err := r.ensureDashboard(ctx, shop); err != nil {
+		// Best-effort: a missing Grafana sidecar shouldn't block the Shop.
+		log.Info("ensureDashboard skipped", "reason", err.Error())
 	}
 
 	if err := r.ensureAlertmanagerConfig(ctx, shop); err != nil {
@@ -659,6 +668,47 @@ func (r *ShopReconciler) ensureServiceMonitor(ctx context.Context, shop *appsv1.
 			Interval: "15s",
 		}}
 		return controllerutil.SetControllerReference(shop, sm, r.Scheme)
+	})
+	return err
+}
+
+// dashboardTemplate is the Grafana dashboard JSON, with a $shop placeholder that
+// ensureDashboard replaces per tenant. Embedded so the operator can stamp a
+// dedicated dashboard for every Shop.
+//
+//go:embed dashboard.json
+var dashboardTemplate string
+
+// ensureDashboard creates a per-Shop Grafana dashboard as a ConfigMap labeled
+// grafana_dashboard=1 — the kube-prometheus-stack sidecar imports such ConfigMaps
+// cluster-wide. The template's $shop placeholder is replaced with this Shop's
+// name and the templating dropdown is dropped, so each Shop gets its own
+// dashboard object (spec 4.1: "svaka Shop aplikacija treba da ima svoj dashboard")
+// rather than one shared dashboard with a selector. Owned by the Shop, so it's
+// garbage-collected on deletion.
+func (r *ShopReconciler) ensureDashboard(ctx context.Context, shop *appsv1.Shop) error {
+	var dash map[string]any
+	if err := json.Unmarshal([]byte(strings.ReplaceAll(dashboardTemplate, "$shop", shop.Name)), &dash); err != nil {
+		return fmt.Errorf("parse dashboard template: %w", err)
+	}
+	dash["title"] = "Shop — " + shop.Name
+	dash["uid"] = "shop-" + shop.Name
+	dash["templating"] = map[string]any{"list": []any{}}
+	rendered, err := json.Marshal(dash)
+	if err != nil {
+		return err
+	}
+
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: shop.Name + "-dashboard", Namespace: shop.Namespace},
+	}
+	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, cm, func() error {
+		if cm.Labels == nil {
+			cm.Labels = map[string]string{}
+		}
+		cm.Labels["grafana_dashboard"] = "1"
+		cm.Data = map[string]string{"shop.json": string(rendered)}
+		return controllerutil.SetControllerReference(shop, cm, r.Scheme)
 	})
 	return err
 }
