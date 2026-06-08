@@ -707,6 +707,14 @@ func (r *ShopReconciler) ensureDashboard(ctx context.Context, shop *appsv1.Shop)
 			cm.Labels = map[string]string{}
 		}
 		cm.Labels["grafana_dashboard"] = "1"
+		// grafana_folder groups every dashboard of a tenant into one Grafana
+		// folder (named after the tenant namespace). The Grafana sidecar reads
+		// this annotation (folderAnnotation) — folder-level permissions can then
+		// restrict each tenant's folder to that tenant (spec 4.1 per-user access).
+		if cm.Annotations == nil {
+			cm.Annotations = map[string]string{}
+		}
+		cm.Annotations["grafana_folder"] = shop.Namespace
 		cm.Data = map[string]string{"shop.json": string(rendered)}
 		return controllerutil.SetControllerReference(shop, cm, r.Scheme)
 	})
