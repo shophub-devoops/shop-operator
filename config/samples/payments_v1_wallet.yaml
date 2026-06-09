@@ -6,4 +6,9 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: wallet-sample
 spec:
-  # TODO(user): Add fields here
+  # Testnet the wallet targets: ethereum | sepolia | polygon-amoy | solana.
+  network: sepolia
+  # Optional: pin to a pre-existing address. If omitted, the operator
+  # generates a secp256k1 keypair and stores the private key in a Secret
+  # named "<wallet>-key" (key "private-key").
+  # ownerAddress: "0x45bE1a4b8b09F6c7B2C0E1F3a4d5e6f7a8b9C060"
