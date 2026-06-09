@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"sync"
@@ -35,6 +36,7 @@ import (
 const (
 	promDatasourceUID = "prometheus"
 	lokiDatasourceUID = "P8E80F9AEF21F6940"
+	grafanaAdminUser  = "admin"
 )
 
 // grafanaClient is a minimal HTTP client for the Grafana org-provisioning we
@@ -73,7 +75,7 @@ func newGrafanaClientFromEnv() *grafanaClient {
 	}
 	return &grafanaClient{
 		baseURL: base,
-		user:    envOr("GRAFANA_ADMIN_USER", "admin"),
+		user:    envOr("GRAFANA_ADMIN_USER", grafanaAdminUser),
 		pass:    os.Getenv("GRAFANA_ADMIN_PASSWORD"),
 		promURL: envOr("GRAFANA_PROMETHEUS_URL", "http://kube-prometheus-stack-prometheus.monitoring:9090"),
 		lokiURL: envOr("GRAFANA_LOKI_URL", "http://loki:3100"),
@@ -135,16 +137,25 @@ func (g *grafanaClient) ensureOrg(ctx context.Context, name string) (int64, erro
 	return created.OrgID, nil
 }
 
+// grafanaDatasource is the create payload for POST /api/datasources.
+type grafanaDatasource struct {
+	Name      string `json:"name"`
+	Type      string `json:"type"`
+	UID       string `json:"uid"`
+	URL       string `json:"url"`
+	Access    string `json:"access"`
+	IsDefault bool   `json:"isDefault"`
+}
+
 // ensureDatasources creates the Prometheus and Loki datasources (with the UIDs
 // the dashboard references) in the given org if they are not already present.
 func (g *grafanaClient) ensureDatasources(ctx context.Context, orgID int64) error {
-	datasources := []map[string]any{
-		{"name": "Prometheus", "type": "prometheus", "uid": promDatasourceUID, "url": g.promURL, "access": "proxy", "isDefault": true},
-		{"name": "Loki", "type": "loki", "uid": lokiDatasourceUID, "url": g.lokiURL, "access": "proxy", "isDefault": false},
+	datasources := []grafanaDatasource{
+		{Name: "Prometheus", Type: "prometheus", UID: promDatasourceUID, URL: g.promURL, Access: "proxy", IsDefault: true},
+		{Name: "Loki", Type: "loki", UID: lokiDatasourceUID, URL: g.lokiURL, Access: "proxy"},
 	}
 	for _, ds := range datasources {
-		uid, _ := ds["uid"].(string)
-		err := g.do(ctx, http.MethodGet, "/api/datasources/uid/"+uid, orgID, nil, nil)
+		err := g.do(ctx, http.MethodGet, "/api/datasources/uid/"+ds.UID, orgID, nil, nil)
 		if err == nil {
 			continue // already exists
 		}
@@ -167,9 +178,7 @@ func (g *grafanaClient) ensureDatasources(ctx context.Context, orgID int64) erro
 // an org-local create/update rather than an id collision.
 func (g *grafanaClient) upsertDashboard(ctx context.Context, orgID int64, dashboard map[string]any) error {
 	dash := make(map[string]any, len(dashboard))
-	for k, v := range dashboard {
-		dash[k] = v
-	}
+	maps.Copy(dash, dashboard)
 	delete(dash, "id")
 	body := map[string]any{
 		"dashboard": dash,

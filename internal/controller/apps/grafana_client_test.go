@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -78,8 +79,7 @@ func (f *fakeGrafana) handler() http.Handler {
 	mux.HandleFunc("/api/user/using/", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		var id int64
-		_, _ = fmtSscan(strings.TrimPrefix(r.URL.Path, "/api/user/using/"), &id)
+		id, _ := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/api/user/using/"), 10, 64)
 		f.activeOrg = id
 		w.WriteHeader(http.StatusOK)
 	})
@@ -128,19 +128,6 @@ func (f *fakeGrafana) handler() http.Handler {
 	return mux
 }
 
-// fmtSscan is a tiny wrapper so the test doesn't import fmt twice oddly.
-func fmtSscan(s string, out *int64) (int, error) {
-	var n int64
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			break
-		}
-		n = n*10 + int64(c-'0')
-	}
-	*out = n
-	return 1, nil
-}
-
 func TestSyncTenantDashboard(t *testing.T) {
 	fake := newFakeGrafana()
 	srv := httptest.NewServer(fake.handler())
@@ -148,7 +135,7 @@ func TestSyncTenantDashboard(t *testing.T) {
 
 	g := &grafanaClient{
 		baseURL: srv.URL,
-		user:    "admin",
+		user:    grafanaAdminUser,
 		pass:    "pw",
 		promURL: "http://prom",
 		lokiURL: "http://loki",
@@ -189,7 +176,7 @@ func TestEnsureOrgReusesExisting(t *testing.T) {
 	srv := httptest.NewServer(fake.handler())
 	defer srv.Close()
 
-	g := &grafanaClient{baseURL: srv.URL, user: "admin", pass: "pw", http: srv.Client()}
+	g := &grafanaClient{baseURL: srv.URL, user: grafanaAdminUser, pass: "pw", http: srv.Client()}
 	id, err := g.ensureOrg(context.Background(), "tenant-x")
 	if err != nil {
 		t.Fatalf("ensureOrg: %v", err)
