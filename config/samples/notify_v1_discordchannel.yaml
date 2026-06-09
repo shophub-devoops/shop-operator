@@ -6,4 +6,12 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: discordchannel-sample
 spec:
-  # TODO(user): Add fields here
+  # Discord server (guild) snowflake where the channel is created.
+  guildId: "123456789012345678"
+  # Channel name to create/maintain on the guild.
+  name: "shop-alerts"
+  # Secret (key "token") holding the bot token. The bot needs
+  # Manage Channels + Manage Webhooks on the guild. Create it with:
+  #   kubectl create secret generic discord-bot --from-literal=token=YOUR_BOT_TOKEN
+  botTokenRef:
+    name: discord-bot
