@@ -58,6 +58,10 @@ import (
 type ShopReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// Grafana provisions a per-tenant Grafana org + dashboard so a ShopHub user
+	// sees only their own Shop dashboards (spec 4.1 optional). Nil when Grafana
+	// is not configured (GRAFANA_URL unset) — org sync is then a no-op.
+	Grafana *grafanaClient
 }
 
 const (
@@ -718,7 +722,20 @@ func (r *ShopReconciler) ensureDashboard(ctx context.Context, shop *appsv1.Shop)
 		cm.Data = map[string]string{"shop.json": string(rendered)}
 		return controllerutil.SetControllerReference(shop, cm, r.Scheme)
 	})
-	return err
+	if err != nil {
+		return err
+	}
+
+	// In addition to the ConfigMap (imported into Grafana's default org, where
+	// maintainers see every Shop), push the same dashboard into a per-tenant
+	// Grafana org so the ShopHub user sees only their own Shops (spec 4.1
+	// optional). Best-effort: handled by the caller's skip-on-error.
+	if r.Grafana != nil {
+		if err := r.Grafana.syncTenantDashboard(ctx, shop.Namespace, dash); err != nil {
+			return fmt.Errorf("grafana org sync: %w", err)
+		}
+	}
+	return nil
 }
 
 // ensureAlertmanagerConfig creates an AlertmanagerConfig that routes this Shop's
@@ -869,6 +886,11 @@ func (r *ShopReconciler) shopsForWebhookSecret(ctx context.Context, obj client.O
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *ShopReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Configure the per-tenant Grafana org client from env (no-op if unset).
+	if r.Grafana == nil {
+		r.Grafana = newGrafanaClientFromEnv()
+	}
+
 	// D4: index Shops by their referenced Discord webhook Secret name so the
 	// Secret watch below can find affected Shops in O(1).
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &appsv1.Shop{}, discordWebhookRefField,
