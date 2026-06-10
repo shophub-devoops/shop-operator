@@ -114,6 +114,13 @@ const (
 	// Ignored by the Postgres path. Set to the Shop name (the DB the operator
 	// provisions for this tenant).
 	envShopDBName = "SHOP_DB_NAME"
+	// envAdminPassword guards the Shop's admin endpoints (item writes, order
+	// listing). Injected from the generated <shop>-admin Secret; ShopHub reads
+	// the same Secret to show the owner their admin password.
+	envAdminPassword = "ADMIN_PASSWORD"
+	// passwordKey is the Secret key under which generated passwords are stored
+	// (both the MongoDB user password and the Shop admin password Secrets).
+	passwordKey = "password"
 	// cnpgClusterLabel is the label CNPG puts on the resources it generates
 	// (including the <shop>-app connection Secret); its value is the cluster name.
 	cnpgClusterLabel = "cnpg.io/cluster"
@@ -173,6 +180,12 @@ func (r *ShopReconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			cond(condAvailable, metav1.ConditionFalse, "DatabaseProvisioning", "database not ready"),
 		)
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
+	// Admin password Secret: guards the Shop's admin endpoints. ShopHub reads
+	// this same Secret to show the owner their credentials.
+	if err := r.ensurePasswordSecret(ctx, shop, adminSecretName(shop)); err != nil {
+		return ctrl.Result{}, fmt.Errorf("ensureAdminSecret: %w", err)
 	}
 
 	if err := r.ensureDeployment(ctx, shop, dbSecretName); err != nil {
@@ -302,7 +315,7 @@ func (r *ShopReconciler) ensureMongoDBDatabase(ctx context.Context, shop *appsv1
 	}
 
 	pwSecretName := shop.Name + "-mongo-pw"
-	if err := r.ensureMongoPasswordSecret(ctx, shop, pwSecretName); err != nil {
+	if err := r.ensurePasswordSecret(ctx, shop, pwSecretName); err != nil {
 		return "", fmt.Errorf("ensure mongo password secret: %w", err)
 	}
 
@@ -326,7 +339,7 @@ func (r *ShopReconciler) ensureMongoDBDatabase(ctx context.Context, shop *appsv1
 				DB:   "admin",
 				PasswordSecretRef: mongodbv1.SecretKeyReference{
 					Name: pwSecretName,
-					Key:  "password",
+					Key:  passwordKey,
 				},
 				Roles: []mongodbv1.Role{
 					{Name: "dbOwner", DB: shop.Name},
@@ -367,9 +380,11 @@ func (r *ShopReconciler) ensureMongoDBDatabase(ctx context.Context, shop *appsv1
 	return connSecretName, nil
 }
 
-// ensureMongoPasswordSecret creates a Secret with a random password if absent.
-// The Shop owns this Secret so it's garbage-collected when the Shop is deleted.
-func (r *ShopReconciler) ensureMongoPasswordSecret(ctx context.Context, shop *appsv1.Shop, name string) error {
+// ensurePasswordSecret creates a Secret with a random password under the
+// "password" key if absent. Used for both the MongoDB user password and the
+// Shop admin password. The Shop owns the Secret so it's garbage-collected when
+// the Shop is deleted.
+func (r *ShopReconciler) ensurePasswordSecret(ctx context.Context, shop *appsv1.Shop, name string) error {
 	existing := &corev1.Secret{}
 	err := r.Get(ctx, client.ObjectKey{Namespace: shop.Namespace, Name: name}, existing)
 	if err == nil {
@@ -491,6 +506,11 @@ func dbEnvFromSecret(kind appsv1.DatabaseKind, secretName string) []corev1.EnvVa
 	}}
 }
 
+// adminSecretName is the per-shop Secret holding the admin password.
+func adminSecretName(shop *appsv1.Shop) string {
+	return shop.Name + "-admin"
+}
+
 // shopEnv is the full container env: the DATABASE_URL secret-ref plus the OTLP
 // tracing config pointing the backend at the in-cluster Tempo. OTEL_SERVICE_NAME
 // is the shop name so traces are grouped per tenant.
@@ -500,6 +520,12 @@ func shopEnv(shop *appsv1.Shop, dbSecretName string) []corev1.EnvVar {
 		corev1.EnvVar{Name: envOTELService, Value: shop.Name},
 		corev1.EnvVar{Name: envWalletAddress, Value: shop.Spec.WalletAddress},
 		corev1.EnvVar{Name: envShopDBName, Value: shop.Name},
+		corev1.EnvVar{Name: envAdminPassword, ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: adminSecretName(shop)},
+				Key:                  passwordKey,
+			},
+		}},
 	)
 }
 
