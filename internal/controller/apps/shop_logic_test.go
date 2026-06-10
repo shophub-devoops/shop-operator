@@ -88,6 +88,17 @@ func TestShopEnvIncludesTracing(t *testing.T) {
 	if got[envOTELService] != tShop2 {
 		t.Errorf("%s = %q, want %q", envOTELService, got[envOTELService], tShop2)
 	}
+
+	// The admin password is a secret-ref to the per-shop admin Secret.
+	var adminRef *corev1.SecretKeySelector
+	for _, e := range shopEnv(shop, tShop2+"-app") {
+		if e.Name == envAdminPassword && e.ValueFrom != nil {
+			adminRef = e.ValueFrom.SecretKeyRef
+		}
+	}
+	if adminRef == nil || adminRef.Name != tShop2+"-admin" || adminRef.Key != passwordKey {
+		t.Errorf("%s secret-ref = %+v, want %s-admin/%s", envAdminPassword, adminRef, tShop2, passwordKey)
+	}
 }
 
 func TestShopForCNPGSecret(t *testing.T) {
