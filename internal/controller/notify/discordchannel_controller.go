@@ -66,16 +66,29 @@ func (r *DiscordChannelReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	// Handle deletion via finalizer before anything that needs the bot token:
+	// if the token Secret was already deleted, requiring it here would make the
+	// finalizer unremovable and block the CR's deletion forever.
+	if !ch.DeletionTimestamp.IsZero() {
+		botToken, err := r.readBotToken(ctx, ch)
+		if apierrors.IsNotFound(err) {
+			// Token Secret is gone — the Discord-side channel can no longer be
+			// cleaned up. Unblock deletion instead of retrying forever.
+			log.Info("bot token secret missing on delete; skipping Discord cleanup",
+				"channelId", ch.Status.ChannelID)
+			return r.removeFinalizer(ctx, ch)
+		}
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("read bot token: %w", err)
+		}
+		return r.reconcileDelete(ctx, ch, newDiscordClient(botToken))
+	}
+
 	botToken, err := r.readBotToken(ctx, ch)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("read bot token: %w", err)
 	}
 	dc := newDiscordClient(botToken)
-
-	// Handle deletion via finalizer.
-	if !ch.DeletionTimestamp.IsZero() {
-		return r.reconcileDelete(ctx, ch, dc)
-	}
 
 	// Ensure finalizer is present before any external work.
 	if !controllerutil.ContainsFinalizer(ch, discordChannelFinalizer) {
@@ -147,6 +160,19 @@ func (r *DiscordChannelReconciler) reconcileDelete(ctx context.Context, ch *noti
 		}
 	}
 
+	res, err := r.removeFinalizer(ctx, ch)
+	if err == nil && res.IsZero() {
+		log.Info("DiscordChannel cleaned up", "channelId", ch.Status.ChannelID)
+	}
+	return res, err
+}
+
+// removeFinalizer lifts the finalizer so the API server can finish deleting
+// the CR. Conflicts are benign — the deletion event re-triggers reconcile.
+func (r *DiscordChannelReconciler) removeFinalizer(ctx context.Context, ch *notifyv1.DiscordChannel) (ctrl.Result, error) {
+	if !controllerutil.ContainsFinalizer(ch, discordChannelFinalizer) {
+		return ctrl.Result{}, nil
+	}
 	controllerutil.RemoveFinalizer(ch, discordChannelFinalizer)
 	if err := r.Update(ctx, ch); err != nil {
 		if apierrors.IsConflict(err) {
@@ -154,7 +180,6 @@ func (r *DiscordChannelReconciler) reconcileDelete(ctx context.Context, ch *noti
 		}
 		return ctrl.Result{}, fmt.Errorf("remove finalizer: %w", err)
 	}
-	log.Info("DiscordChannel cleaned up", "channelId", ch.Status.ChannelID)
 	return ctrl.Result{}, nil
 }
 
