@@ -98,6 +98,17 @@ func (r *DiscordChannelReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 		channelID = dch.ID
+		// Persist the channel ID before any further external work: if the
+		// webhook step below fails and we requeue without it, the retry would
+		// create a duplicate channel on the guild (and the finalizer could
+		// never clean the orphans up).
+		ch.Status.ChannelID = channelID
+		if err := r.Status().Update(ctx, ch); err != nil {
+			if apierrors.IsConflict(err) {
+				return ctrl.Result{Requeue: true}, nil
+			}
+			return ctrl.Result{}, fmt.Errorf("persist channel id: %w", err)
+		}
 	}
 
 	// Webhook Secret: create on first run, reuse afterward.
@@ -177,7 +188,11 @@ func (r *DiscordChannelReconciler) ensureWebhookSecret(ctx context.Context, ch *
 		return err
 	}
 
-	wh, err := dc.createWebhook(ctx, channelID, ch.Spec.Name+"-webhook")
+	// Fixed webhook name: Discord rejects webhook names containing the word
+	// "discord" (USERNAME_INVALID_CONTAINS), and channel/shop-derived names
+	// can legitimately contain it. The name is only a display label on the
+	// posted messages, so one constant fits every channel.
+	wh, err := dc.createWebhook(ctx, channelID, "shophub-alerts")
 	if err != nil {
 		return fmt.Errorf("create webhook: %w", err)
 	}
