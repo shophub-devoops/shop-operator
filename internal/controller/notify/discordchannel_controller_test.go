@@ -101,6 +101,36 @@ var _ = Describe("DiscordChannel Controller", func() {
 			_ = k8sClient.Delete(ctx, sec)
 		})
 
+		It("unblocks deletion when the bot token secret is already gone", func() {
+			controllerReconciler := &DiscordChannelReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			By("Reconciling once so the finalizer is present")
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Deleting the bot-token Secret, then the CR")
+			sec := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: botSecretName, Namespace: testNamespace}}
+			Expect(k8sClient.Delete(ctx, sec)).To(Succeed())
+			refreshed := &notifyv1.DiscordChannel{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, refreshed)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, refreshed)).To(Succeed())
+
+			By("Reconciling the deletion — the finalizer must be lifted, not stuck on the missing Secret")
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Verifying the CR is fully gone")
+			err = k8sClient.Get(ctx, typeNamespacedName, &notifyv1.DiscordChannel{})
+			Expect(errors.IsNotFound(err)).To(BeTrue())
+		})
+
 		It("adds the finalizer on first reconcile (no Discord API call)", func() {
 			By("Reconciling the created resource — first pass should add finalizer and exit")
 			controllerReconciler := &DiscordChannelReconciler{
