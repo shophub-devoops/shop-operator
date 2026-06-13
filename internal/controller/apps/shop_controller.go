@@ -870,24 +870,34 @@ func replicasFor(shop *appsv1.Shop) int32 {
 	return 2
 }
 
-// hasCNPGClusterLabel passes only Secrets CNPG generated, so the Secret watch
-// doesn't wake the controller on every Secret in the cluster.
-func hasCNPGClusterLabel(o client.Object) bool {
-	_, ok := o.GetLabels()[cnpgClusterLabel]
-	return ok
+// isConnectionSecret matches the operator-pinned database connection Secret
+// named "<shop>-app". CNPG publishes its app Secret as "<cluster>-app" and we
+// pin the MongoDB community operator's connection-string Secret to the same
+// name, so this one predicate keeps the Secret watch off unrelated Secrets for
+// both database kinds.
+func isConnectionSecret(o client.Object) bool {
+	return strings.HasSuffix(o.GetName(), "-app")
 }
 
-// shopForCNPGSecret maps a CNPG-generated Secret to its owning Shop. CNPG names
-// the cluster after the Shop, so the cnpg.io/cluster label value IS the Shop
-// name in the same namespace.
-func (r *ShopReconciler) shopForCNPGSecret(_ context.Context, obj client.Object) []reconcile.Request {
-	cluster := obj.GetLabels()[cnpgClusterLabel]
-	if cluster == "" {
+// shopForConnectionSecret maps a "<shop>-app" connection Secret back to its
+// owning Shop in the same namespace, so the controller reacts the moment either
+// database operator (CNPG or MongoDB) publishes the connection Secret instead
+// of waiting for the requeue.
+func (r *ShopReconciler) shopForConnectionSecret(_ context.Context, obj client.Object) []reconcile.Request {
+	name, ok := strings.CutSuffix(obj.GetName(), "-app")
+	if !ok || name == "" {
 		return nil
 	}
 	return []reconcile.Request{{
-		NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: cluster},
+		NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: name},
 	}}
+}
+
+// hasWebhookSecretSuffix passes only the "<channel>-webhook" Secrets the
+// DiscordChannel controller publishes, so the webhook watch's indexed lookup
+// stays off every unrelated Secret event.
+func hasWebhookSecretSuffix(o client.Object) bool {
+	return strings.HasSuffix(o.GetName(), "-webhook")
 }
 
 // shopsForWebhookSecret answers "which Shops reference this Secret as their
@@ -936,14 +946,17 @@ func (r *ShopReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}).
 		Owns(&cnpgv1.Cluster{}).
 		Owns(&mongodbv1.MongoDBCommunity{}).
-		// D3: react the moment CNPG publishes the <shop>-app Secret (predicate
-		// keeps us off unrelated Secrets) instead of waiting for the requeue.
+		// D3: react the moment either database operator publishes the <shop>-app
+		// connection Secret (predicate keeps us off unrelated Secrets) instead of
+		// waiting for the requeue.
 		Watches(&corev1.Secret{},
-			handler.EnqueueRequestsFromMapFunc(r.shopForCNPGSecret),
-			builder.WithPredicates(predicate.NewPredicateFuncs(hasCNPGClusterLabel))).
-		// D4: re-reconcile Shops when their Discord webhook Secret changes.
+			handler.EnqueueRequestsFromMapFunc(r.shopForConnectionSecret),
+			builder.WithPredicates(predicate.NewPredicateFuncs(isConnectionSecret))).
+		// D4: re-reconcile Shops when their Discord webhook Secret changes. The
+		// predicate keeps the indexed lookup off every unrelated Secret event.
 		Watches(&corev1.Secret{},
-			handler.EnqueueRequestsFromMapFunc(r.shopsForWebhookSecret)).
+			handler.EnqueueRequestsFromMapFunc(r.shopsForWebhookSecret),
+			builder.WithPredicates(predicate.NewPredicateFuncs(hasWebhookSecretSuffix))).
 		Named("apps-shop").
 		Complete(r)
 }
