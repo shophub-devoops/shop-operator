@@ -101,20 +101,21 @@ func TestShopEnvIncludesTracing(t *testing.T) {
 	}
 }
 
-func TestShopForCNPGSecret(t *testing.T) {
+func TestShopForConnectionSecret(t *testing.T) {
 	r := &ShopReconciler{}
+	// Both database kinds publish their connection Secret as "<shop>-app", so the
+	// mapper keys off the name suffix (covers CNPG and the MongoDB operator alike).
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
 		Name: tShop2 + "-app", Namespace: tNS,
-		Labels: map[string]string{cnpgClusterLabel: tShop2},
 	}}
-	reqs := r.shopForCNPGSecret(context.Background(), secret)
+	reqs := r.shopForConnectionSecret(context.Background(), secret)
 	if len(reqs) != 1 || reqs[0].Name != tShop2 || reqs[0].Namespace != tNS {
 		t.Errorf("requests = %+v, want one for %s/%s", reqs, tNS, tShop2)
 	}
-	// A Secret without the CNPG label maps to nothing.
+	// A Secret whose name isn't "<shop>-app" maps to nothing.
 	plain := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: tNS}}
-	if reqs := r.shopForCNPGSecret(context.Background(), plain); len(reqs) != 0 {
-		t.Errorf("unlabelled secret produced requests: %+v", reqs)
+	if reqs := r.shopForConnectionSecret(context.Background(), plain); len(reqs) != 0 {
+		t.Errorf("non-connection secret produced requests: %+v", reqs)
 	}
 }
 
