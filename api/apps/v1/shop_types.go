@@ -106,6 +106,7 @@ type ShopStatus struct {
 // +kubebuilder:resource:shortName=sh,categories={shophub}
 // +kubebuilder:printcolumn:name="TITLE",type="string",JSONPath=".spec.title"
 // +kubebuilder:printcolumn:name="DB",type="string",JSONPath=".spec.database"
+// +kubebuilder:printcolumn:name="AVAILABILITY",type="string",JSONPath=".spec.availability"
 // +kubebuilder:printcolumn:name="READY",type="integer",JSONPath=".status.readyReplicas"
 // +kubebuilder:printcolumn:name="URL",type="string",JSONPath=".status.url"
 // +kubebuilder:printcolumn:name="AGE",type="date",JSONPath=".metadata.creationTimestamp"

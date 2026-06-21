@@ -25,6 +25,9 @@ spec:
     - jsonPath: .spec.database
       name: DB
       type: string
+    - jsonPath: .spec.availability
+      name: AVAILABILITY
+      type: string
     - jsonPath: .status.readyReplicas
       name: READY
       type: integer
