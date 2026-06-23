@@ -27,6 +27,12 @@ import (
 	"testing"
 )
 
+// testShopUID and testTenantNS are reused across the Grafana client tests.
+const (
+	testShopUID  = "shop-acme"
+	testTenantNS = "tenant-acme"
+)
+
 // fakeGrafana is a minimal in-memory Grafana that records what the client does,
 // so we can assert org creation, the active-org switch, datasource and
 // dashboard writes happen as expected.
@@ -157,12 +163,12 @@ func TestSyncTenantDashboard(t *testing.T) {
 		http:    srv.Client(),
 	}
 
-	dash := map[string]any{"uid": "shop-acme", "title": "Shop — acme", "id": float64(7)}
-	if err := g.syncTenantDashboard(context.Background(), "tenant-acme", dash); err != nil {
+	dash := map[string]any{"uid": testShopUID, "title": "Shop — acme", "id": float64(7)}
+	if err := g.syncTenantDashboard(context.Background(), testTenantNS, dash); err != nil {
 		t.Fatalf("syncTenantDashboard: %v", err)
 	}
 
-	orgID := fake.orgsByName["tenant-acme"]
+	orgID := fake.orgsByName[testTenantNS]
 	if orgID == 0 {
 		t.Fatal("tenant org was not created")
 	}
@@ -173,7 +179,7 @@ func TestSyncTenantDashboard(t *testing.T) {
 		}
 	}
 	// Dashboard imported into the tenant org (not the default org).
-	if got := fake.dashboards[orgID]; len(got) != 1 || got[0] != "shop-acme" {
+	if got := fake.dashboards[orgID]; len(got) != 1 || got[0] != testShopUID {
 		t.Errorf("tenant org dashboards = %v, want [shop-acme]", got)
 	}
 
@@ -194,16 +200,16 @@ func TestDeleteTenantDashboard(t *testing.T) {
 		promURL: "http://prom", lokiURL: "http://loki", http: srv.Client(),
 	}
 
-	dash := map[string]any{"uid": "shop-acme", "title": "Shop — acme"}
-	if err := g.syncTenantDashboard(context.Background(), "tenant-acme", dash); err != nil {
+	dash := map[string]any{"uid": testShopUID, "title": "Shop — acme"}
+	if err := g.syncTenantDashboard(context.Background(), testTenantNS, dash); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
-	orgID := fake.orgsByName["tenant-acme"]
+	orgID := fake.orgsByName[testTenantNS]
 	if got := fake.dashboards[orgID]; len(got) != 1 {
 		t.Fatalf("precondition: tenant org dashboards = %v, want one", got)
 	}
 
-	if err := g.deleteTenantDashboard(context.Background(), "tenant-acme", "shop-acme"); err != nil {
+	if err := g.deleteTenantDashboard(context.Background(), testTenantNS, testShopUID); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	if got := fake.dashboards[orgID]; len(got) != 0 {
@@ -212,10 +218,10 @@ func TestDeleteTenantDashboard(t *testing.T) {
 
 	// Idempotent: deleting an already-gone dashboard, or one in a non-existent
 	// org, must both no-op so finalizer cleanup never wedges.
-	if err := g.deleteTenantDashboard(context.Background(), "tenant-acme", "shop-acme"); err != nil {
+	if err := g.deleteTenantDashboard(context.Background(), testTenantNS, testShopUID); err != nil {
 		t.Errorf("second delete should no-op, got %v", err)
 	}
-	if err := g.deleteTenantDashboard(context.Background(), "tenant-missing", "shop-acme"); err != nil {
+	if err := g.deleteTenantDashboard(context.Background(), "tenant-missing", testShopUID); err != nil {
 		t.Errorf("delete in missing org should no-op, got %v", err)
 	}
 }
