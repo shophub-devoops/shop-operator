@@ -27,6 +27,12 @@ import (
 	"testing"
 )
 
+// testShopUID and testTenantNS are reused across the Grafana client tests.
+const (
+	testShopUID  = "shop-acme"
+	testTenantNS = "tenant-acme"
+)
+
 // fakeGrafana is a minimal in-memory Grafana that records what the client does,
 // so we can assert org creation, the active-org switch, datasource and
 // dashboard writes happen as expected.
@@ -125,6 +131,21 @@ func (f *fakeGrafana) handler() http.Handler {
 		w.WriteHeader(http.StatusOK)
 	})
 
+	mux.HandleFunc("/api/dashboards/uid/", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		uid := strings.TrimPrefix(r.URL.Path, "/api/dashboards/uid/")
+		cur := f.dashboards[f.activeOrg]
+		for i, u := range cur {
+			if u == uid {
+				f.dashboards[f.activeOrg] = append(cur[:i], cur[i+1:]...)
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+		}
+		http.Error(w, "not found", http.StatusNotFound)
+	})
+
 	return mux
 }
 
@@ -142,12 +163,12 @@ func TestSyncTenantDashboard(t *testing.T) {
 		http:    srv.Client(),
 	}
 
-	dash := map[string]any{"uid": "shop-acme", "title": "Shop — acme", "id": float64(7)}
-	if err := g.syncTenantDashboard(context.Background(), "tenant-acme", dash); err != nil {
+	dash := map[string]any{"uid": testShopUID, "title": "Shop — acme", "id": float64(7)}
+	if err := g.syncTenantDashboard(context.Background(), testTenantNS, dash); err != nil {
 		t.Fatalf("syncTenantDashboard: %v", err)
 	}
 
-	orgID := fake.orgsByName["tenant-acme"]
+	orgID := fake.orgsByName[testTenantNS]
 	if orgID == 0 {
 		t.Fatal("tenant org was not created")
 	}
@@ -158,7 +179,7 @@ func TestSyncTenantDashboard(t *testing.T) {
 		}
 	}
 	// Dashboard imported into the tenant org (not the default org).
-	if got := fake.dashboards[orgID]; len(got) != 1 || got[0] != "shop-acme" {
+	if got := fake.dashboards[orgID]; len(got) != 1 || got[0] != testShopUID {
 		t.Errorf("tenant org dashboards = %v, want [shop-acme]", got)
 	}
 
@@ -166,6 +187,42 @@ func TestSyncTenantDashboard(t *testing.T) {
 	// ConfigMap path), while the uploaded copy dropped the id.
 	if _, ok := dash["id"]; !ok {
 		t.Error("upsertDashboard mutated the caller's dashboard map (removed id)")
+	}
+}
+
+func TestDeleteTenantDashboard(t *testing.T) {
+	fake := newFakeGrafana()
+	srv := httptest.NewServer(fake.handler())
+	defer srv.Close()
+
+	g := &grafanaClient{
+		baseURL: srv.URL, user: grafanaAdminUser, pass: "pw",
+		promURL: "http://prom", lokiURL: "http://loki", http: srv.Client(),
+	}
+
+	dash := map[string]any{"uid": testShopUID, "title": "Shop — acme"}
+	if err := g.syncTenantDashboard(context.Background(), testTenantNS, dash); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	orgID := fake.orgsByName[testTenantNS]
+	if got := fake.dashboards[orgID]; len(got) != 1 {
+		t.Fatalf("precondition: tenant org dashboards = %v, want one", got)
+	}
+
+	if err := g.deleteTenantDashboard(context.Background(), testTenantNS, testShopUID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if got := fake.dashboards[orgID]; len(got) != 0 {
+		t.Errorf("after delete dashboards = %v, want empty", got)
+	}
+
+	// Idempotent: deleting an already-gone dashboard, or one in a non-existent
+	// org, must both no-op so finalizer cleanup never wedges.
+	if err := g.deleteTenantDashboard(context.Background(), testTenantNS, testShopUID); err != nil {
+		t.Errorf("second delete should no-op, got %v", err)
+	}
+	if err := g.deleteTenantDashboard(context.Background(), "tenant-missing", testShopUID); err != nil {
+		t.Errorf("delete in missing org should no-op, got %v", err)
 	}
 }
 
