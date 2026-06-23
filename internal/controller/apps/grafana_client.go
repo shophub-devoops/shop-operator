@@ -113,15 +113,28 @@ type orgRef struct {
 	Name string `json:"name"`
 }
 
+// lookupOrg returns the id of the org named name. found is false (with no error)
+// when the org does not exist, so cleanup paths can no-op instead of creating it.
+func (g *grafanaClient) lookupOrg(ctx context.Context, name string) (id int64, found bool, err error) {
+	var org orgRef
+	err = g.do(ctx, http.MethodGet, "/api/orgs/name/"+name, 0, nil, &org)
+	if err == nil {
+		return org.ID, true, nil
+	}
+	if apiErr, ok := err.(*grafanaAPIError); ok && apiErr.Status == http.StatusNotFound {
+		return 0, false, nil
+	}
+	return 0, false, err
+}
+
 // ensureOrg returns the id of the org named name, creating it if absent.
 func (g *grafanaClient) ensureOrg(ctx context.Context, name string) (int64, error) {
-	var org orgRef
-	err := g.do(ctx, http.MethodGet, "/api/orgs/name/"+name, 0, nil, &org)
-	if err == nil {
-		return org.ID, nil
-	}
-	if apiErr, ok := err.(*grafanaAPIError); !ok || apiErr.Status != http.StatusNotFound {
+	id, found, err := g.lookupOrg(ctx, name)
+	if err != nil {
 		return 0, err
+	}
+	if found {
+		return id, nil
 	}
 
 	var created struct {
@@ -129,12 +142,30 @@ func (g *grafanaClient) ensureOrg(ctx context.Context, name string) (int64, erro
 	}
 	if err := g.do(ctx, http.MethodPost, "/api/orgs", 0, map[string]any{"name": name}, &created); err != nil {
 		// Lost a create race (another reconcile won) — re-read by name.
-		if err2 := g.do(ctx, http.MethodGet, "/api/orgs/name/"+name, 0, nil, &org); err2 == nil {
-			return org.ID, nil
+		if id, found, err2 := g.lookupOrg(ctx, name); err2 == nil && found {
+			return id, nil
 		}
 		return 0, err
 	}
 	return created.OrgID, nil
+}
+
+// deleteTenantDashboard removes a Shop's dashboard (by uid) from its tenant org.
+// Idempotent: a missing org or already-deleted dashboard is treated as success,
+// so finalizer-driven cleanup never wedges on state that is already gone.
+func (g *grafanaClient) deleteTenantDashboard(ctx context.Context, namespace, uid string) error {
+	orgID, found, err := g.lookupOrg(ctx, namespace)
+	if err != nil {
+		return fmt.Errorf("lookup org: %w", err)
+	}
+	if !found {
+		return nil
+	}
+	err = g.do(ctx, http.MethodDelete, "/api/dashboards/uid/"+uid, orgID, nil, nil)
+	if apiErr, ok := err.(*grafanaAPIError); ok && apiErr.Status == http.StatusNotFound {
+		return nil
+	}
+	return err
 }
 
 // grafanaDatasource is the create payload for POST /api/datasources.

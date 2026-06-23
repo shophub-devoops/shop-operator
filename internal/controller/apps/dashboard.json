@@ -267,16 +267,6 @@
         "reduceOptions": { "calcs": ["lastNotNull"] }
       },
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
-    },
-    {
-      "type": "text",
-      "title": "Note",
-      "id": 8,
-      "gridPos": { "h": 4, "w": 18, "x": 6, "y": 36 },
-      "options": {
-        "mode": "markdown",
-        "content": "**Jedinstveni posetioci** (zahtev 4.1.d): broji distinct `(client_ip, user_agent)` parove iz Loki logova preko `count(sum by (client_ip, user_agent) (count_over_time(...[24h])))`. Visoka kardinalnost IP+UA je razlog što ide kroz logove (Loki), ne kroz Prometheus metrike."
-      }
     }
   ],
   "refresh": "30s",

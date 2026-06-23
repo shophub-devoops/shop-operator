@@ -144,6 +144,11 @@ const (
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch;delete
 
+// shopFinalizer guards external cleanup that owner-reference GC can't do: the
+// per-tenant Grafana org dashboard is pushed over HTTP, not a K8s object, so it
+// must be removed explicitly before the Shop disappears.
+const shopFinalizer = "apps.shophub.local/grafana-tenant-dashboard"
+
 func (r *ShopReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	res, err := r.reconcile(ctx, req)
 	if apierrors.IsConflict(err) {
@@ -161,6 +166,18 @@ func (r *ShopReconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	shop := &appsv1.Shop{}
 	if err := r.Get(ctx, req.NamespacedName, shop); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	// Deletion: run external cleanup (the tenant Grafana dashboard) then drop the
+	// finalizer. Everything else this controller creates is owned by the Shop and
+	// garbage-collected automatically.
+	if !shop.DeletionTimestamp.IsZero() {
+		return r.reconcileDelete(ctx, shop)
+	}
+	if controllerutil.AddFinalizer(shop, shopFinalizer) {
+		if err := r.Update(ctx, shop); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	dbSecretName, err := r.ensureDatabase(ctx, shop)
@@ -221,6 +238,28 @@ func (r *ShopReconciler) reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, fmt.Errorf("updateStatus: %w", err)
 	}
 
+	return ctrl.Result{}, nil
+}
+
+// reconcileDelete performs best-effort external cleanup that owner-reference GC
+// can't reach, then removes the finalizer so the Shop can be deleted. The tenant
+// Grafana org dashboard is pushed over HTTP (not a K8s object owned by the Shop),
+// so it would otherwise linger after deletion. Grafana being unreachable must not
+// wedge deletion — like every other Grafana call here it's best-effort.
+func (r *ShopReconciler) reconcileDelete(ctx context.Context, shop *appsv1.Shop) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+	if !controllerutil.ContainsFinalizer(shop, shopFinalizer) {
+		return ctrl.Result{}, nil
+	}
+	if r.Grafana != nil {
+		if err := r.Grafana.deleteTenantDashboard(ctx, shop.Namespace, "shop-"+shop.Name); err != nil {
+			log.Info("grafana tenant dashboard cleanup skipped", "reason", err.Error())
+		}
+	}
+	controllerutil.RemoveFinalizer(shop, shopFinalizer)
+	if err := r.Update(ctx, shop); err != nil {
+		return ctrl.Result{}, err
+	}
 	return ctrl.Result{}, nil
 }
 

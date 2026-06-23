@@ -125,6 +125,21 @@ func (f *fakeGrafana) handler() http.Handler {
 		w.WriteHeader(http.StatusOK)
 	})
 
+	mux.HandleFunc("/api/dashboards/uid/", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		uid := strings.TrimPrefix(r.URL.Path, "/api/dashboards/uid/")
+		cur := f.dashboards[f.activeOrg]
+		for i, u := range cur {
+			if u == uid {
+				f.dashboards[f.activeOrg] = append(cur[:i], cur[i+1:]...)
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+		}
+		http.Error(w, "not found", http.StatusNotFound)
+	})
+
 	return mux
 }
 
@@ -166,6 +181,42 @@ func TestSyncTenantDashboard(t *testing.T) {
 	// ConfigMap path), while the uploaded copy dropped the id.
 	if _, ok := dash["id"]; !ok {
 		t.Error("upsertDashboard mutated the caller's dashboard map (removed id)")
+	}
+}
+
+func TestDeleteTenantDashboard(t *testing.T) {
+	fake := newFakeGrafana()
+	srv := httptest.NewServer(fake.handler())
+	defer srv.Close()
+
+	g := &grafanaClient{
+		baseURL: srv.URL, user: grafanaAdminUser, pass: "pw",
+		promURL: "http://prom", lokiURL: "http://loki", http: srv.Client(),
+	}
+
+	dash := map[string]any{"uid": "shop-acme", "title": "Shop — acme"}
+	if err := g.syncTenantDashboard(context.Background(), "tenant-acme", dash); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	orgID := fake.orgsByName["tenant-acme"]
+	if got := fake.dashboards[orgID]; len(got) != 1 {
+		t.Fatalf("precondition: tenant org dashboards = %v, want one", got)
+	}
+
+	if err := g.deleteTenantDashboard(context.Background(), "tenant-acme", "shop-acme"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if got := fake.dashboards[orgID]; len(got) != 0 {
+		t.Errorf("after delete dashboards = %v, want empty", got)
+	}
+
+	// Idempotent: deleting an already-gone dashboard, or one in a non-existent
+	// org, must both no-op so finalizer cleanup never wedges.
+	if err := g.deleteTenantDashboard(context.Background(), "tenant-acme", "shop-acme"); err != nil {
+		t.Errorf("second delete should no-op, got %v", err)
+	}
+	if err := g.deleteTenantDashboard(context.Background(), "tenant-missing", "shop-acme"); err != nil {
+		t.Errorf("delete in missing org should no-op, got %v", err)
 	}
 }
 
