@@ -118,6 +118,9 @@ const (
 	// listing). Injected from the generated <shop>-admin Secret; ShopHub reads
 	// the same Secret to show the owner their admin password.
 	envAdminPassword = "ADMIN_PASSWORD"
+	// envDiscordWebhookURL lets the Shop backend post order notifications to the
+	// shop's Discord channel (same webhook Alertmanager uses for alerts).
+	envDiscordWebhookURL = "DISCORD_WEBHOOK_URL"
 	// passwordKey is the Secret key under which generated passwords are stored
 	// (both the MongoDB user password and the Shop admin password Secrets).
 	passwordKey = "password"
@@ -554,7 +557,7 @@ func adminSecretName(shop *appsv1.Shop) string {
 // tracing config pointing the backend at the in-cluster Tempo. OTEL_SERVICE_NAME
 // is the shop name so traces are grouped per tenant.
 func shopEnv(shop *appsv1.Shop, dbSecretName string) []corev1.EnvVar {
-	return append(dbEnvFromSecret(shop.Spec.Database, dbSecretName),
+	env := append(dbEnvFromSecret(shop.Spec.Database, dbSecretName),
 		corev1.EnvVar{Name: envOTLPEndpoint, Value: tempoOTLPEndpoint},
 		corev1.EnvVar{Name: envOTELService, Value: shop.Name},
 		corev1.EnvVar{Name: envWalletAddress, Value: shop.Spec.WalletAddress},
@@ -566,6 +569,25 @@ func shopEnv(shop *appsv1.Shop, dbSecretName string) []corev1.EnvVar {
 			},
 		}},
 	)
+	// Discord webhook for order notifications, from the same Secret the
+	// AlertmanagerConfig routes alerts through. Optional: the DiscordChannel
+	// controller publishes the Secret asynchronously, and a shop must not be
+	// held down by a missing/broken Discord integration — pods start without
+	// notifications and pick the value up on the next rollout.
+	if shop.Spec.DiscordWebhookSecretRef != nil {
+		optional := true
+		env = append(env, corev1.EnvVar{
+			Name: envDiscordWebhookURL,
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: shop.Spec.DiscordWebhookSecretRef.Name},
+					Key:                  discordWebhookKey,
+					Optional:             &optional,
+				},
+			},
+		})
+	}
+	return env
 }
 
 func ingressBaseDomain() string {
