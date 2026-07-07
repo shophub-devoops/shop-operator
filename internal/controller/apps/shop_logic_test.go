@@ -99,6 +99,35 @@ func TestShopEnvIncludesTracing(t *testing.T) {
 	if adminRef == nil || adminRef.Name != tShop2+"-admin" || adminRef.Key != passwordKey {
 		t.Errorf("%s secret-ref = %+v, want %s-admin/%s", envAdminPassword, adminRef, tShop2, passwordKey)
 	}
+
+	// No Discord webhook ref → no DISCORD_WEBHOOK_URL env at all.
+	if _, ok := got[envDiscordWebhookURL]; ok {
+		t.Errorf("unexpected %s for shop without a Discord channel", envDiscordWebhookURL)
+	}
+}
+
+func TestShopEnvDiscordWebhook(t *testing.T) {
+	shop := &appsv1.Shop{
+		ObjectMeta: metav1.ObjectMeta{Name: tShop2},
+		Spec: appsv1.ShopSpec{
+			Database:                appsv1.DatabasePostgres,
+			DiscordWebhookSecretRef: &corev1.SecretReference{Name: tShop2 + "-webhook"},
+		},
+	}
+	var ref *corev1.SecretKeySelector
+	for _, e := range shopEnv(shop, tShop2+"-app") {
+		if e.Name == envDiscordWebhookURL && e.ValueFrom != nil {
+			ref = e.ValueFrom.SecretKeyRef
+		}
+	}
+	if ref == nil || ref.Name != tShop2+"-webhook" || ref.Key != discordWebhookKey {
+		t.Fatalf("%s secret-ref = %+v, want %s-webhook/%s", envDiscordWebhookURL, ref, tShop2, discordWebhookKey)
+	}
+	// Optional: pods must start even before the DiscordChannel controller
+	// publishes the webhook Secret.
+	if ref.Optional == nil || !*ref.Optional {
+		t.Errorf("webhook secret-ref should be optional")
+	}
 }
 
 func TestShopForConnectionSecret(t *testing.T) {
