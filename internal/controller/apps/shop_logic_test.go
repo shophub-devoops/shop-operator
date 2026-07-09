@@ -233,3 +233,51 @@ func TestReconcileCreatesWorkloadAndConditions(t *testing.T) {
 		t.Errorf("Available = %s/%s, want False/%s", avail.Status, avail.Reason, reasonDeploying)
 	}
 }
+
+func TestReconcileAlertmanagerConfigScopedToShop(t *testing.T) {
+	ctx := context.Background()
+	s := testScheme(t)
+
+	shop := &appsv1.Shop{
+		ObjectMeta: metav1.ObjectMeta{Name: tShop, Namespace: tNS},
+		Spec: appsv1.ShopSpec{
+			Title:                   "Shop One",
+			Availability:            appsv1.AvailabilityStandard,
+			Database:                appsv1.DatabasePostgres,
+			WalletAddress:           "0xABC",
+			DiscordWebhookSecretRef: &corev1.SecretReference{Name: tShop + "-webhook"},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: tShop + "-app", Namespace: tNS,
+			Labels: map[string]string{cnpgClusterLabel: tShop},
+		},
+		Data: map[string][]byte{cnpgURIKey: []byte("postgres://u:p@host:5432/db")},
+	}
+
+	c := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(shop, secret).
+		WithStatusSubresource(&appsv1.Shop{}).
+		Build()
+	r := &ShopReconciler{Client: c, Scheme: s}
+
+	if _, err := r.Reconcile(ctx, reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: tShop, Namespace: tNS},
+	}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	ac := &monitoringv1alpha1.AlertmanagerConfig{}
+	if err := c.Get(ctx, types.NamespacedName{Name: tShop, Namespace: tNS}, ac); err != nil {
+		t.Fatalf("get alertmanagerconfig: %v", err)
+	}
+	// The route must be scoped to THIS shop: OnNamespace pins the namespace, but
+	// several shops can share one tenant namespace — without the service matcher
+	// each shop's channel would get every sibling shop's alerts.
+	ms := ac.Spec.Route.Matchers
+	if len(ms) != 1 || ms[0].Name != "service" || ms[0].Value != tShop || ms[0].MatchType != monitoringv1alpha1.MatchEqual {
+		t.Fatalf("route matchers = %+v, want single service=%s equality matcher", ms, tShop)
+	}
+}

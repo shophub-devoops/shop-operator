@@ -845,7 +845,17 @@ func (r *ShopReconciler) ensureAlertmanagerConfig(ctx context.Context, shop *app
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, ac, func() error {
 		ac.Spec = monitoringv1alpha1.AlertmanagerConfigSpec{
 			Route: &monitoringv1alpha1.Route{
-				Receiver:       "discord",
+				Receiver: "discord",
+				// Scope the route to THIS shop's alerts. OnNamespace already pins
+				// the namespace, but one tenant namespace can hold several shops —
+				// without this matcher every shop's channel receives every sibling
+				// shop's alerts. All shop rules aggregate by (namespace, service),
+				// so the service label carries the shop name.
+				Matchers: []monitoringv1alpha1.Matcher{{
+					Name:      "service",
+					Value:     shop.Name,
+					MatchType: monitoringv1alpha1.MatchEqual,
+				}},
 				GroupBy:        []string{"alertname"},
 				GroupWait:      "30s",
 				GroupInterval:  "5m",
