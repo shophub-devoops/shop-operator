@@ -464,8 +464,15 @@ func generatePassword() (string, error) {
 
 // ensureMongoDBRBAC materializes the ServiceAccount + Role + RoleBinding that
 // the MongoDB community operator's spawned Pods require, in the Shop's
-// namespace. All three are owned by the Shop CR so they're garbage-collected
-// on Shop deletion.
+// namespace. These three objects have a fixed name (mongoDBDatabaseSA) and are
+// therefore SHARED by every MongoDB Shop in the namespace.
+//
+// Each Shop adds itself as a (non-controller) owner via SetOwnerReference, not
+// SetControllerReference: a controller ref is exclusive, so a second MongoDB
+// Shop in the same tenant namespace would fail with "already owned by another
+// Shop controller" and stall in DatabaseFailed. With plain owner refs every
+// MongoDB Shop co-owns the objects and Kubernetes garbage-collects them only
+// once the last owning Shop is deleted.
 //
 // The operator's Helm chart only installs these in its own namespace, so
 // without this step MongoDBCommunity CRs in other namespaces stall with
@@ -478,7 +485,7 @@ func (r *ShopReconciler) ensureMongoDBRBAC(ctx context.Context, shop *appsv1.Sho
 		},
 	}
 	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, sa, func() error {
-		return controllerutil.SetControllerReference(shop, sa, r.Scheme)
+		return controllerutil.SetOwnerReference(shop, sa, r.Scheme)
 	}); err != nil {
 		return fmt.Errorf("upsert ServiceAccount: %w", err)
 	}
@@ -494,7 +501,7 @@ func (r *ShopReconciler) ensureMongoDBRBAC(ctx context.Context, shop *appsv1.Sho
 			{APIGroups: []string{""}, Resources: []string{"secrets"}, Verbs: []string{"get"}},
 			{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"patch", "delete", "get"}},
 		}
-		return controllerutil.SetControllerReference(shop, role, r.Scheme)
+		return controllerutil.SetOwnerReference(shop, role, r.Scheme)
 	}); err != nil {
 		return fmt.Errorf("upsert Role: %w", err)
 	}
@@ -515,7 +522,7 @@ func (r *ShopReconciler) ensureMongoDBRBAC(ctx context.Context, shop *appsv1.Sho
 			Kind: "ServiceAccount",
 			Name: mongoDBDatabaseSA,
 		}}
-		return controllerutil.SetControllerReference(shop, rb, r.Scheme)
+		return controllerutil.SetOwnerReference(shop, rb, r.Scheme)
 	}); err != nil {
 		return fmt.Errorf("upsert RoleBinding: %w", err)
 	}
