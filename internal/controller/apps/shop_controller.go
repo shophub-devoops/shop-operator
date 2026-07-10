@@ -813,7 +813,14 @@ func (r *ShopReconciler) ensureDashboard(ctx context.Context, shop *appsv1.Shop)
 			cm.Annotations = map[string]string{}
 		}
 		cm.Annotations["grafana_folder"] = shop.Namespace
-		cm.Data = map[string]string{"shop.json": string(rendered)}
+		// The data key becomes the provisioned file name inside the folder dir
+		// (/tmp/dashboards/<namespace>/<key>), and Grafana's file provisioner
+		// tracks one dashboard per file path. A fixed "shop.json" key made every
+		// Shop in a namespace fight over the same file — imports then fail with
+		// "unexpected number of dashboards for id N. found: 2. desired: 1" and
+		// new Shops never appear in the main org. Key by Shop name so each
+		// dashboard provisions from its own file.
+		cm.Data = map[string]string{shop.Name + ".json": string(rendered)}
 		return controllerutil.SetControllerReference(shop, cm, r.Scheme)
 	})
 	if err != nil {
