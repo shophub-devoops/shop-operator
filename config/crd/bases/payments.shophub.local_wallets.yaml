@@ -31,7 +31,6 @@ spec:
     name: v1
     schema:
       openAPIV3Schema:
-        description: Wallet is the Schema for the wallets API
         properties:
           apiVersion:
             description: |-
@@ -51,11 +50,8 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of Wallet
             properties:
               network:
-                description: Network is the blockchain the wallet operates on. Testnets
-                  only for this project.
                 enum:
                 - ethereum
                 - sepolia
@@ -63,22 +59,15 @@ spec:
                 - solana
                 type: string
               ownerAddress:
-                description: |-
-                  OwnerAddress optionally pins the wallet to a pre-existing on-chain address.
-                  If nil, the operator generates a fresh keypair and stores the private key in a Secret.
                 type: string
             required:
             - network
             type: object
           status:
-            description: status defines the observed state of Wallet
             properties:
               address:
-                description: Address is the wallet's public address (either OwnerAddress
-                  copy or operator-generated).
                 type: string
               conditions:
-                description: Conditions track high-level reconcile state.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -138,9 +127,7 @@ spec:
                 - type
                 x-kubernetes-list-type: map
               privateKeySecretRef:
-                description: |-
-                  PrivateKeySecretRef points to the Secret (key: private-key) holding the wallet's
-                  private key. Set only when the operator generated the keypair itself.
+                description: tip je SECRET REFERENCE
                 properties:
                   name:
                     description: name is unique within a namespace to reference a
