@@ -1,19 +1,3 @@
-/*
-Copyright 2026.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package notify
 
 import (
@@ -34,17 +18,11 @@ import (
 )
 
 const (
-	// discordChannelFinalizer guards external Discord state cleanup before the
-	// CR is removed from K8s. Without it, deleting the CR would orphan the
-	// channel on the Discord guild.
 	discordChannelFinalizer = "discordchannel.notify.shophub.local/finalizer"
-	// botTokenField is the Secret key under which the bot token is stored.
-	botTokenField = "token"
-	// webhookURLField is the Secret key under which we store the webhook URL.
-	webhookURLField = "webhook-url"
-)
+	botTokenField           = "token"       // kljuc bot tokena
+	webhookURLField         = "webhook-url" // kljuc webhook url-a, isti kljuc koji shop controller cita
+) // taj lepak izmedju 2 kontrolera
 
-// DiscordChannelReconciler reconciles a DiscordChannel object
 type DiscordChannelReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -55,25 +33,20 @@ type DiscordChannelReconciler struct {
 // +kubebuilder:rbac:groups=notify.shophub.local,resources=discordchannels/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 
-// Reconcile orchestrates Discord-side channel + webhook lifecycle for a
-// DiscordChannel CR. Uses a finalizer so external Discord state is cleaned up
-// before the CR is removed from K8s.
 func (r *DiscordChannelReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
 	ch := &notifyv1.DiscordChannel{}
-	if err := r.Get(ctx, req.NamespacedName, ch); err != nil {
+	if err := r.Get(ctx, req.NamespacedName, ch); err != nil { // ako ga nije naso izlazi
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Handle deletion via finalizer before anything that needs the bot token:
-	// if the token Secret was already deleted, requiring it here would make the
-	// finalizer unremovable and block the CR's deletion forever.
+	// prvo brisanje pa onda gledamo normalan rad
 	if !ch.DeletionTimestamp.IsZero() {
 		botToken, err := r.readBotToken(ctx, ch)
-		if apierrors.IsNotFound(err) {
-			// Token Secret is gone — the Discord-side channel can no longer be
-			// cleaned up. Unblock deletion instead of retrying forever.
+		if apierrors.IsNotFound(err) { // ako je token secret vec obrisan onda ne mozemo da
+			// ocistimo diskord, pa onda moramo da otkocimo brisanje, skidamo finalizer jer
+			// je bolje jedan kanal siroce nego CR koji se nikad ne brise
 			log.Info("bot token secret missing on delete; skipping Discord cleanup",
 				"channelId", ch.Status.ChannelID)
 			return r.removeFinalizer(ctx, ch)
@@ -90,7 +63,7 @@ func (r *DiscordChannelReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 	dc := newDiscordClient(botToken)
 
-	// Ensure finalizer is present before any external work.
+	// dodajemo finalizer pre pocetka rada da nebi bilo sirocica
 	if !controllerutil.ContainsFinalizer(ch, discordChannelFinalizer) {
 		controllerutil.AddFinalizer(ch, discordChannelFinalizer)
 		if err := r.Update(ctx, ch); err != nil {
@@ -102,7 +75,7 @@ func (r *DiscordChannelReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Channel: create on first run, reuse known ID afterward.
+	// pravimo kanal, prvi put je id prazan, dole ga upisujemo, da izbegnemo duplikate kanala
 	channelID := ch.Status.ChannelID
 	if channelID == "" {
 		dch, err := dc.createChannel(ctx, ch.Spec.GuildID, ch.Spec.Name)
@@ -111,27 +84,25 @@ func (r *DiscordChannelReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 		channelID = dch.ID
-		// Persist the channel ID before any further external work: if the
-		// webhook step below fails and we requeue without it, the retry would
-		// create a duplicate channel on the guild (and the finalizer could
-		// never clean the orphans up).
 		ch.Status.ChannelID = channelID
-		if err := r.Status().Update(ctx, ch); err != nil {
+		if err := r.Status().Update(ctx, ch); err != nil { // upisujemo id kanala
 			if apierrors.IsConflict(err) {
 				return ctrl.Result{Requeue: true}, nil
 			}
 			return ctrl.Result{}, fmt.Errorf("persist channel id: %w", err)
 		}
+		// ovime smo sprecili anitepattern, id se upise pre webhook koraka, da je obrnutu i da
+		// webhook pukne retry nebi znao da knaal vec postoji, bilo bi sirocica.
 	}
 
-	// Webhook Secret: create on first run, reuse afterward.
+	// pravimo webhook i secret
 	webhookSecretName := ch.Name + "-webhook"
 	if err := r.ensureWebhookSecret(ctx, ch, dc, channelID, webhookSecretName); err != nil {
 		log.Error(err, "ensureWebhookSecret failed")
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	// Status: only write if drift.
+	// status update samo ako ima promene
 	if ch.Status.ChannelID == channelID && ch.Status.WebhookSecretName == webhookSecretName {
 		return ctrl.Result{}, nil
 	}
@@ -153,22 +124,20 @@ func (r *DiscordChannelReconciler) reconcileDelete(ctx context.Context, ch *noti
 		return ctrl.Result{}, nil
 	}
 
-	if ch.Status.ChannelID != "" {
+	if ch.Status.ChannelID != "" { // obrisi kanal na discordu, ako fail-uje idi opet za 30s
 		if err := dc.deleteChannel(ctx, ch.Status.ChannelID); err != nil {
 			log.Error(err, "deleteChannel failed; will retry")
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 	}
 
-	res, err := r.removeFinalizer(ctx, ch)
+	res, err := r.removeFinalizer(ctx, ch) // skidanje kocnice
 	if err == nil && res.IsZero() {
 		log.Info("DiscordChannel cleaned up", "channelId", ch.Status.ChannelID)
 	}
 	return res, err
 }
 
-// removeFinalizer lifts the finalizer so the API server can finish deleting
-// the CR. Conflicts are benign — the deletion event re-triggers reconcile.
 func (r *DiscordChannelReconciler) removeFinalizer(ctx context.Context, ch *notifyv1.DiscordChannel) (ctrl.Result, error) {
 	if !controllerutil.ContainsFinalizer(ch, discordChannelFinalizer) {
 		return ctrl.Result{}, nil
@@ -183,7 +152,6 @@ func (r *DiscordChannelReconciler) removeFinalizer(ctx context.Context, ch *noti
 	return ctrl.Result{}, nil
 }
 
-// readBotToken pulls the bot token from the referenced Secret.
 func (r *DiscordChannelReconciler) readBotToken(ctx context.Context, ch *notifyv1.DiscordChannel) (string, error) {
 	ns := ch.Spec.BotTokenRef.Namespace
 	if ns == "" {
@@ -213,10 +181,7 @@ func (r *DiscordChannelReconciler) ensureWebhookSecret(ctx context.Context, ch *
 		return err
 	}
 
-	// Fixed webhook name: Discord rejects webhook names containing the word
-	// "discord" (USERNAME_INVALID_CONTAINS), and channel/shop-derived names
-	// can legitimately contain it. The name is only a display label on the
-	// posted messages, so one constant fits every channel.
+	// ime webhooka je fiksno jer discord odbija webhook imena koja sadrze rec discord u njima
 	wh, err := dc.createWebhook(ctx, channelID, "shophub-alerts")
 	if err != nil {
 		return fmt.Errorf("create webhook: %w", err)
@@ -232,6 +197,7 @@ func (r *DiscordChannelReconciler) ensureWebhookSecret(ctx context.Context, ch *
 		},
 		StringData: map[string]string{webhookURLField: wh.URL},
 	}
+	// owner
 	if err := controllerutil.SetControllerReference(ch, sec, r.Scheme); err != nil {
 		return err
 	}
@@ -244,7 +210,7 @@ func (r *DiscordChannelReconciler) ensureWebhookSecret(ctx context.Context, ch *
 	return nil
 }
 
-// SetupWithManager sets up the controller with the Manager.
+// mnnogo prostiji od shopa, nema watches/predicates, ne zavisi od drugih objekata
 func (r *DiscordChannelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&notifyv1.DiscordChannel{}).

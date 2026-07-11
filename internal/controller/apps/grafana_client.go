@@ -1,19 +1,3 @@
-/*
-Copyright 2026.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package apps
 
 import (
@@ -29,27 +13,12 @@ import (
 	"time"
 )
 
-// Datasource UIDs the embedded dashboard.json references. A freshly-created
-// Grafana org has no datasources, so we recreate them here with these exact
-// UIDs — otherwise the imported dashboard's panels point at non-existent
-// datasources and render "Datasource not found".
 const (
 	promDatasourceUID = "prometheus"
 	lokiDatasourceUID = "P8E80F9AEF21F6940"
 	grafanaAdminUser  = "admin"
 )
 
-// grafanaClient is a minimal HTTP client for the Grafana org-provisioning we
-// need (spec 4.1 optional: each ShopHub tenant sees only their own dashboards).
-// It authenticates as the Grafana admin (basic auth) and provisions, per tenant
-// namespace, a dedicated Grafana Organization holding that tenant's datasources
-// and Shop dashboards. ShopHub creates the per-tenant user that logs into the
-// org (see the shophub backend's grafana provisioning).
-//
-// True per-tenant isolation requires Organizations: in OSS Grafana the basic
-// Viewer role is org-wide, so folder permissions alone cannot scope a user to a
-// single folder. A separate org per tenant is the only OSS-native way to keep
-// one tenant from seeing another's dashboards.
 type grafanaClient struct {
 	baseURL string
 	user    string
@@ -57,20 +26,15 @@ type grafanaClient struct {
 	promURL string
 	lokiURL string
 	http    *http.Client
-
-	// mu serializes the "switch admin's active org, then operate" sequence.
-	// Grafana scopes basic-auth writes to the admin user's current org (set via
-	// /api/user/using/:id), which is shared mutable state; the lock keeps two
-	// concurrent reconciles from writing into each other's org.
+	// mora da koristimo organizacije jer je to jedini nacin da se u free grafani izoluju tenanti, folderi nisu dovoljni
+	// grafana admin ima trenutnu aktivnu organizaciju, pisanja idu na tu organizaciju
+	// ako 2 reconcile rade isotovremeno jedan bi mogoao da pise u tudju organizaciju, zato mutex
 	mu sync.Mutex
 }
 
-// newGrafanaClientFromEnv builds a grafanaClient from GRAFANA_* env, or returns
-// nil when GRAFANA_URL is unset so the controller treats org provisioning as a
-// best-effort no-op (same pattern as the other optional integrations).
 func newGrafanaClientFromEnv() *grafanaClient {
 	base := os.Getenv("GRAFANA_URL")
-	if base == "" {
+	if base == "" { // ako grafana nije podesena vrati nil, ne radimo nista
 		return nil
 	}
 	return &grafanaClient{
@@ -90,31 +54,26 @@ func envOr(key, def string) string {
 	return def
 }
 
-// syncTenantDashboard provisions everything a tenant org needs to render one
-// Shop dashboard: the org itself, its datasources, and the dashboard. Idempotent
-// — safe to call on every reconcile.
 func (g *grafanaClient) syncTenantDashboard(ctx context.Context, namespace string, dashboard map[string]any) error {
-	orgID, err := g.ensureOrg(ctx, namespace)
+	orgID, err := g.ensureOrg(ctx, namespace) // napravi organizaciju ako ne postoji
 	if err != nil {
 		return fmt.Errorf("ensure org: %w", err)
 	}
-	if err := g.ensureDatasources(ctx, orgID); err != nil {
+	if err := g.ensureDatasources(ctx, orgID); err != nil { // dodaj prometheus i loki u nju
 		return fmt.Errorf("ensure datasources: %w", err)
 	}
-	if err := g.upsertDashboard(ctx, orgID, dashboard); err != nil {
+	if err := g.upsertDashboard(ctx, orgID, dashboard); err != nil { // ubaci dashboard
 		return fmt.Errorf("upsert dashboard: %w", err)
 	}
 	return nil
 }
 
-// orgRef is the subset of Grafana's org response we read.
 type orgRef struct {
 	ID   int64  `json:"id"`
 	Name string `json:"name"`
 }
 
-// lookupOrg returns the id of the org named name. found is false (with no error)
-// when the org does not exist, so cleanup paths can no-op instead of creating it.
+// vracamo ime organizacije
 func (g *grafanaClient) lookupOrg(ctx context.Context, name string) (id int64, found bool, err error) {
 	var org orgRef
 	err = g.do(ctx, http.MethodGet, "/api/orgs/name/"+name, 0, nil, &org)
@@ -122,12 +81,11 @@ func (g *grafanaClient) lookupOrg(ctx context.Context, name string) (id int64, f
 		return org.ID, true, nil
 	}
 	if apiErr, ok := err.(*grafanaAPIError); ok && apiErr.Status == http.StatusNotFound {
-		return 0, false, nil
+		return 0, false, nil // ako nema organizacije no-operation
 	}
 	return 0, false, err
 }
 
-// ensureOrg returns the id of the org named name, creating it if absent.
 func (g *grafanaClient) ensureOrg(ctx context.Context, name string) (int64, error) {
 	id, found, err := g.lookupOrg(ctx, name)
 	if err != nil {
@@ -141,7 +99,6 @@ func (g *grafanaClient) ensureOrg(ctx context.Context, name string) (int64, erro
 		OrgID int64 `json:"orgId"`
 	}
 	if err := g.do(ctx, http.MethodPost, "/api/orgs", 0, map[string]any{"name": name}, &created); err != nil {
-		// Lost a create race (another reconcile won) — re-read by name.
 		if id, found, err2 := g.lookupOrg(ctx, name); err2 == nil && found {
 			return id, nil
 		}
@@ -150,15 +107,12 @@ func (g *grafanaClient) ensureOrg(ctx context.Context, name string) (int64, erro
 	return created.OrgID, nil
 }
 
-// deleteTenantDashboard removes a Shop's dashboard (by uid) from its tenant org.
-// Idempotent: a missing org or already-deleted dashboard is treated as success,
-// so finalizer-driven cleanup never wedges on state that is already gone.
 func (g *grafanaClient) deleteTenantDashboard(ctx context.Context, namespace, uid string) error {
 	orgID, found, err := g.lookupOrg(ctx, namespace)
 	if err != nil {
 		return fmt.Errorf("lookup org: %w", err)
 	}
-	if !found {
+	if !found { // ako je nije nasao to je uspeh, no-op
 		return nil
 	}
 	err = g.do(ctx, http.MethodDelete, "/api/dashboards/uid/"+uid, orgID, nil, nil)
@@ -168,7 +122,6 @@ func (g *grafanaClient) deleteTenantDashboard(ctx context.Context, namespace, ui
 	return err
 }
 
-// grafanaDatasource is the create payload for POST /api/datasources.
 type grafanaDatasource struct {
 	Name      string `json:"name"`
 	Type      string `json:"type"`
@@ -178,8 +131,6 @@ type grafanaDatasource struct {
 	IsDefault bool   `json:"isDefault"`
 }
 
-// ensureDatasources creates the Prometheus and Loki datasources (with the UIDs
-// the dashboard references) in the given org if they are not already present.
 func (g *grafanaClient) ensureDatasources(ctx context.Context, orgID int64) error {
 	datasources := []grafanaDatasource{
 		{Name: "Prometheus", Type: "prometheus", UID: promDatasourceUID, URL: g.promURL, Access: "proxy", IsDefault: true},
@@ -188,13 +139,13 @@ func (g *grafanaClient) ensureDatasources(ctx context.Context, orgID int64) erro
 	for _, ds := range datasources {
 		err := g.do(ctx, http.MethodGet, "/api/datasources/uid/"+ds.UID, orgID, nil, nil)
 		if err == nil {
-			continue // already exists
+			continue // vec postoji
 		}
 		if apiErr, ok := err.(*grafanaAPIError); !ok || apiErr.Status != http.StatusNotFound {
 			return err
 		}
 		if err := g.do(ctx, http.MethodPost, "/api/datasources", orgID, ds, nil); err != nil {
-			// A concurrent reconcile may have created it between our GET and POST.
+			// reconcile ga je mozda napravio izmedju get i post, to je ok, samo nastavi
 			if apiErr, ok := err.(*grafanaAPIError); ok && apiErr.Status == http.StatusConflict {
 				continue
 			}
@@ -204,9 +155,6 @@ func (g *grafanaClient) ensureDatasources(ctx context.Context, orgID int64) erro
 	return nil
 }
 
-// upsertDashboard imports dashboard into orgID, overwriting any existing version
-// with the same uid. The dashboard's `id` must be absent so Grafana treats it as
-// an org-local create/update rather than an id collision.
 func (g *grafanaClient) upsertDashboard(ctx context.Context, orgID int64, dashboard map[string]any) error {
 	dash := make(map[string]any, len(dashboard))
 	maps.Copy(dash, dashboard)
@@ -219,7 +167,6 @@ func (g *grafanaClient) upsertDashboard(ctx context.Context, orgID int64, dashbo
 	return g.do(ctx, http.MethodPost, "/api/dashboards/db", orgID, body, nil)
 }
 
-// grafanaAPIError is returned for any non-2xx Grafana response.
 type grafanaAPIError struct {
 	Status int
 	Body   string
@@ -229,9 +176,6 @@ func (e *grafanaAPIError) Error() string {
 	return fmt.Sprintf("grafana API %d: %s", e.Status, e.Body)
 }
 
-// do issues a Grafana API request as the admin user. When orgID > 0 the admin's
-// active org is switched to it first, under the client lock, so the request
-// operates inside the target tenant org.
 func (g *grafanaClient) do(ctx context.Context, method, path string, orgID int64, reqBody, respOut any) error {
 	if orgID > 0 {
 		g.mu.Lock()
@@ -243,7 +187,6 @@ func (g *grafanaClient) do(ctx context.Context, method, path string, orgID int64
 	return g.request(ctx, method, path, reqBody, respOut)
 }
 
-// request performs a single authenticated Grafana API call.
 func (g *grafanaClient) request(ctx context.Context, method, path string, reqBody, respOut any) error {
 	var bodyReader io.Reader
 	if reqBody != nil {

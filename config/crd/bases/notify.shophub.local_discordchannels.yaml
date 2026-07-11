@@ -34,7 +34,6 @@ spec:
     name: v1
     schema:
       openAPIV3Schema:
-        description: DiscordChannel is the Schema for the discordchannels API
         properties:
           apiVersion:
             description: |-
@@ -54,12 +53,11 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of DiscordChannel
             properties:
               botTokenRef:
                 description: |-
-                  BotTokenRef points to a Secret (key: token) containing the Discord bot token.
-                  The bot must hold Manage Channels and Manage Webhooks permissions on the guild.
+                  SecretReference represents a Secret Reference. It has enough information to retrieve secret
+                  in any namespace
                 properties:
                   name:
                     description: name is unique within a namespace to reference a
@@ -72,12 +70,8 @@ spec:
                 type: object
                 x-kubernetes-map-type: atomic
               guildId:
-                description: GuildID is the Discord server (guild) snowflake where
-                  the channel lives.
                 type: string
               name:
-                description: Name is the channel name to create or maintain on the
-                  guild.
                 type: string
             required:
             - botTokenRef
@@ -85,14 +79,10 @@ spec:
             - name
             type: object
           status:
-            description: status defines the observed state of DiscordChannel
             properties:
               channelId:
-                description: ChannelID is the snowflake returned by Discord after
-                  channel creation.
                 type: string
               conditions:
-                description: Conditions track high-level reconcile state.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -152,9 +142,6 @@ spec:
                 - type
                 x-kubernetes-list-type: map
               webhookSecretName:
-                description: |-
-                  WebhookSecretName is the Secret (key: webhook-url) that the Shop controller
-                  reads to post notifications. Created by this controller after channel setup.
                 type: string
             type: object
         required:
