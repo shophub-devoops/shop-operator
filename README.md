@@ -1,75 +1,76 @@
 # shop-operator
 
-The Kubernetes operator that backs the **ShopHub** platform (spec section 3.1).
-Built with [Kubebuilder](https://book.kubebuilder.io/) (multi-group layout), it
-reconciles three Custom Resources into the running infrastructure of a Shop
-tenant.
+Kubernetes operator koji pokreće **ShopHub** platformu (specifikacija 3.1).
+Napravljen sa [Kubebuilder](https://book.kubebuilder.io/)-om (multi-group), a
+zadatak mu je da tri Custom Resource-a pretvori u stvarnu infrastrukturu
+prodavnice.
 
-## CRDs
+## CRD-ovi
 
-| Kind | Group | What the controller does |
-|------|-------|--------------------------|
-| **Shop** | `apps.shophub.local/v1` | Provisions a full storefront: a database via its operator (CNPG `Cluster` for `postgres`, `MongoDBCommunity` for `mongodb`), a Deployment (2 replicas for `standard`, 3 for `high`), Service, Ingress, a Prometheus `ServiceMonitor`, a per-tenant Grafana dashboard (ConfigMap), and — when a Discord webhook is referenced — an `AlertmanagerConfig` that routes the shop's alerts to its channel. Tracks state in `.status` (Available/Progressing/Degraded). |
-| **DiscordChannel** | `notify.shophub.local/v1` | Talks to the real Discord API: creates a channel on the guild and a webhook, stores the webhook URL in a Secret (`<name>-webhook`, key `webhook-url`). A finalizer deletes the channel on the guild before the CR is removed. |
-| **Wallet** | `payments.shophub.local/v1` | Records an externally supplied address, or generates a fresh secp256k1 keypair and stores the private key in a Secret (`<name>-key`). |
+| Kind | Grupa | Šta kontroler radi |
+|------|-------|--------------------|
+| **Shop** | `apps.shophub.local/v1` | Pravi celu prodavnicu: bazu preko njenog operatora (CNPG `Cluster` za `postgres`, `MongoDBCommunity` za `mongodb`), Deployment (2 replike za `standard`, 3 za `high`), Service, Ingress, Prometheus `ServiceMonitor`, Grafana dashboard po tenantu (ConfigMap), i — kad je referenciran Discord webhook — `AlertmanagerConfig` koji alarme prodavnice šalje u njen kanal. Stanje piše u `.status` (Available/Progressing/Degraded). |
+| **DiscordChannel** | `notify.shophub.local/v1` | Priča sa pravim Discord API-jem: pravi kanal na guildu i webhook, čuva webhook URL u Secret-u (`<ime>-webhook`, ključ `webhook-url`). Finalizer briše kanal na guildu pre nego što se CR obriše. |
+| **Wallet** | `payments.shophub.local/v1` | Zapiše spolja datu adresu, ili sam generiše novi secp256k1 par ključeva i privatni ključ čuva u Secret-u (`<ime>-key`). |
 
-See [`config/samples/`](config/samples/) for a working example of each.
+Radni primer svakog vidi u [`config/samples/`](config/samples/).
 
-## Architecture notes
+## Kako radi (bitne stvari)
 
-- **Database is operator-managed.** The Shop controller creates the database CR
-  and waits for the operator-published connection Secret (`<shop>-app`), then
-  injects it into the storefront Deployment as `DATABASE_URL`. CNPG publishes the
-  URI under the `uri` key; the MongoDB Community operator under
-  `connectionString.standard`.
-- **MongoDB per-namespace RBAC.** The MongoDB Community operator's chart only
-  installs the `mongodb-database` ServiceAccount (+ Role/RoleBinding) in its own
-  namespace, so the controller materializes them in every tenant namespace.
-- **Observability wiring.** Each Shop gets its own dashboard (the embedded
-  [`dashboard.json`](internal/controller/apps/dashboard.json) is stamped with the
-  tenant name) and the backend is pointed at the in-cluster Tempo OTLP endpoint
-  for tracing.
-- **Garbage collection.** Every child object carries an OwnerReference to its
-  Shop/Wallet/DiscordChannel, so deleting a CR cleans up everything it created.
+- **Bazu pravi tuđi operator.** Shop kontroler napravi CR baze i čeka da taj
+  operator objavi konekcioni Secret (`<shop>-app`), pa ga ubaci u Deployment
+  storefront-a kao `DATABASE_URL`. CNPG objavi URI pod ključem `uri`, MongoDB
+  operator pod `connectionString.standard`.
+- **Reconcile je idempotentan.** Svaka `ensure` funkcija prvo pročita postojeće
+  stanje; ako je već kako treba, ništa ne dira. Checkpoint je uvek `.status`.
+- **Garbage collection.** Svaki napravljeni objekat nosi OwnerReference ka svom
+  Shop/Wallet/DiscordChannel CR-u, pa brisanje CR-a počisti sve što je napravio.
+- **Watch sa predikatom.** Operator ne prati sve Secret-e u klasteru (memory
+  leak), nego filtrira po sufiksu (`-app`, `-webhook`).
 
-## Layout
+> ⚠️ **Ne brišite ručno `<shop>-app` Secret.** Objavljuje ga operator baze
+> (CNPG/MongoDB) i sadrži konekcioni string ka bazi prodavnice — bez njega
+> storefront ne može na bazu. Operator ga posmatra i vraća se u čekanje ako
+> nestane, ali elegantnog automatskog oporavka za ručno brisanje nema.
+
+## Struktura
 
 ```
-api/{apps,notify,payments}/v1/   # CRD Go types (+ generated deepcopy)
-internal/controller/{apps,notify,payments}/  # the three reconcilers + tests
-config/                          # kustomize: CRDs, RBAC, manager, samples
-cmd/main.go                      # manager entrypoint
-Dockerfile                       # distroless controller image
+api/{apps,notify,payments}/v1/               # Go tipovi CRD-ova (+ generisani deepcopy)
+internal/controller/{apps,notify,payments}/  # tri reconciler-a + testovi
+config/                                       # kustomize: CRD-ovi, RBAC, manager, samples
+cmd/main.go                                   # ulaz (manager)
+Dockerfile                                    # slika kontrolera
 ```
 
-The chart that deploys this operator (Deployment + RBAC + CRDs + PrometheusRule)
-lives in the [`helm-charts`](https://github.com/shophub-devoops/helm-charts) repo
-under `charts/shop-operator`.
+Helm chart koji deploy-uje ovaj operator (Deployment + RBAC + CRD-ovi +
+PrometheusRule) je u [`helm-charts`](https://github.com/shophub-devoops/helm-charts)
+repou, pod `charts/shop-operator`.
 
-## Development
+## Razvoj
 
-Requires Go (see `go.mod`), `make`, and Docker (for envtest / image builds).
+Treba Go (vidi `go.mod`), `make` i Docker (za envtest / build slike).
 
 ```bash
-make manifests generate   # regenerate CRDs + deepcopy after editing api/ types
-make test                 # unit + envtest controller tests (downloads envtest bins)
-make build                # compile the manager binary
-make docker-build         # build the controller image
+make manifests generate   # regeneriši CRD-ove + deepcopy posle izmene api/ tipova
+make test                 # unit + envtest testovi kontrolera
+make build                # kompajliraj manager binarni fajl
+make docker-build         # napravi sliku kontrolera
 ```
 
-Run against a cluster from your kubeconfig:
+Pokretanje protiv klastera iz kubeconfig-a:
 
 ```bash
-make install              # apply CRDs
-make run                  # run the manager locally
+make install              # apply CRD-ova
+make run                  # pokreni manager lokalno
 ```
 
 ## CI
 
-- **test** — build, vet and run the unit + envtest controller tests on every PR.
-- **test-e2e** — Kind-based end-to-end test.
+- **test** — build, vet i unit + envtest testovi na svakom PR-u.
+- **test-e2e** — end-to-end test na Kind klasteru.
 - **lint** — `golangci-lint`.
-- **docker-build** — builds the controller image on PRs (no push).
-- **docker-publish** — pushes the image to DockerHub (`shop-operator-controller`)
-  with SemVer tags on `main` / tags.
-- **commit-lint** — enforces Conventional Commits.
+- **docker-build** — build slike na PR-u (bez push-a) + hadolint.
+- **docker-publish** — push slike na DockerHub (`shop-operator-controller`) sa
+  SemVer tagovima na `main` / tagovima.
+- **commit-lint** — Conventional Commits.
